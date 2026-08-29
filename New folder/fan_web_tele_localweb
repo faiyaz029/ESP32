@@ -1,0 +1,370 @@
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <UniversalTelegramBot.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <DHT.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
+#include <time.h>
+
+// ----------------------------
+// Configuration
+// ----------------------------
+
+// WiFi credentials
+const char* ssid = "fzpc";
+const char* password = "29402011";
+
+// Telegram settings
+#define BOT_TOKEN "8050439108:AAEXlV9xp2qI5HW-oisJUHrsrE5Rv2MvBv0"
+#define CHAT_ID "1360445792"
+WiFiClientSecure client;
+UniversalTelegramBot bot(BOT_TOKEN, client);
+
+// External website endpoint (v0)
+const char* serverUrl = "https://v0-esp32-weather-dashboard.vercel.app/api/readings";
+
+// DHT22 sensor settings
+#define DHTPIN 13
+#define DHTTYPE DHT22
+DHT dht(DHTPIN, DHTTYPE);
+
+// Fan control settings
+#define FAN_PWM 32
+#define FAN_RPM 25
+#define FAN_PWM_CHANNEL 0
+#define PWM_FREQ 25000
+#define PWM_RESOLUTION 8
+
+// Onboard LED for visual cues (blinking)
+#define LED_PIN 2
+
+// ----------------------------
+// Timing Intervals
+// ----------------------------
+unsigned long lastRPMCheck = 0;
+unsigned long lastWebsiteSend = 0;
+const unsigned long websiteInterval = 20 * 60 * 1000UL;   // 20 minutes
+unsigned long lastRestart = 0;
+const unsigned long restartInterval = 60 * 60 * 1000UL;     // 1 hour
+
+// ----------------------------
+// Global Variables
+// ----------------------------
+String fanMode = "Slow";
+int fanDuty = 0;
+volatile int pulseCount = 0;
+int rpm = 0;
+
+WebServer server(80);
+
+// ----------------------------
+// Function Prototypes
+// ----------------------------
+void calculateRPM();
+void setFanSpeed(int duty, const String &mode);
+void handleNewMessages(int numNewMessages);
+void sendStatus();
+void sendWebsiteData();
+void blinkLED(int times);
+void handleRoot();
+void handleSetFan();
+String getFormattedTime();
+
+// ----------------------------
+// Interrupt Service Routine (ISR)
+// ----------------------------
+void IRAM_ATTR rpmISR() {
+  pulseCount++;
+}
+
+// ----------------------------
+// Setup Function
+// ----------------------------
+void setup() {
+  Serial.begin(115200);
+  dht.begin();
+  pinMode(LED_PIN, OUTPUT);
+
+  // Setup PWM for fan control
+  ledcSetup(FAN_PWM_CHANNEL, PWM_FREQ, PWM_RESOLUTION);
+  ledcAttachPin(FAN_PWM, FAN_PWM_CHANNEL);
+
+  // Setup RPM sensor input and attach interrupt (FALLING edge)
+  pinMode(FAN_RPM, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(FAN_RPM), rpmISR, FALLING);
+
+  // Connect to WiFi
+  Serial.print("Connecting to WiFi");
+  WiFi.begin(ssid, password);
+  client.setCACert(TELEGRAM_CERTIFICATE_ROOT);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected. IP: " + WiFi.localIP().toString());
+
+  // Start mDNS (dashboard available at http://espfan.local)
+  if (MDNS.begin("espfan")) {
+    Serial.println("mDNS responder started at http://espfan.local");
+  }
+
+  // Setup NTP to get real time (for local dashboard)
+  configTime(21600, 0, "pool.ntp.org");
+  Serial.print("Waiting for time sync");
+  struct tm timeinfo;
+  while (!getLocalTime(&timeinfo)) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nTime synchronized!");
+
+  // Setup web server endpoints
+  server.on("/", handleRoot);        // Dashboard page
+  server.on("/setfan", handleSetFan);  // Fan control endpoint (via query string)
+  server.begin();
+  Serial.println("HTTP server started");
+
+  // Initial Telegram message notifying online status
+  bot.sendMessage(CHAT_ID, "ESP32 Fan Controller online", "");
+
+  // Initialize timing variables for website send and auto-restart
+  lastWebsiteSend = millis();
+  lastRestart = millis();
+}
+
+// ----------------------------
+// Main Loop
+// ----------------------------
+void loop() {
+  // --- RPM Calculation every 1 second ---
+  if (millis() - lastRPMCheck > 1000) {
+    calculateRPM();
+    lastRPMCheck = millis();
+  }
+  
+  // --- Send data to external website every 20 minutes ---
+  if (millis() - lastWebsiteSend > websiteInterval) {
+    sendWebsiteData();
+    blinkLED(4);  // Blink LED 4 times after posting website data
+    lastWebsiteSend = millis();
+  }
+  
+  // --- Auto-restart ESP32 every hour ---
+  if (millis() - lastRestart > restartInterval) {
+    blinkLED(5);  // Blink LED 5 times before restart
+    Serial.println("Restarting ESP32 for stability...");
+    delay(1000);
+    ESP.restart();
+  }
+  
+  // --- Handle incoming Telegram messages ---
+  int numNewMessages = bot.getUpdates(bot.last_message_received + 1);
+  while (numNewMessages) {
+    handleNewMessages(numNewMessages);
+    numNewMessages = bot.getUpdates(bot.last_message_received + 1);
+  }
+  
+  // --- Handle client requests on the local web server ---
+  server.handleClient();
+  
+  delay(50);
+}
+
+// ----------------------------
+// Function Details
+// ----------------------------
+
+// Calculate RPM from pulseCount; assuming 2 pulses per revolution
+void calculateRPM() {
+  int count = pulseCount;
+  pulseCount = 0;
+  rpm = (count * 60) / 2;
+  Serial.print("RPM: ");
+  Serial.println(rpm);
+}
+
+// Set the fan speed using PWM and update fan mode (Telegram and web control feedback)
+void setFanSpeed(int duty, const String &mode) {
+  fanDuty = duty;
+  fanMode = mode;
+  ledcWrite(FAN_PWM_CHANNEL, fanDuty);
+  String message = "Fan set to " + fanMode + " (duty: " + String(fanDuty) + ")";
+  bot.sendMessage(CHAT_ID, message, "");
+  Serial.println(message);
+}
+
+// Blink the onboard LED a specified number of times
+void blinkLED(int times) {
+  for (int i = 0; i < times; i++) {
+    digitalWrite(LED_PIN, HIGH);
+    delay(150);
+    digitalWrite(LED_PIN, LOW);
+    delay(150);
+  }
+}
+
+// Process Telegram commands for fan control and status
+void handleNewMessages(int numNewMessages) {
+  for (int i = 0; i < numNewMessages; i++) {
+    String text = bot.messages[i].text;
+    String chatId = bot.messages[i].chat_id;
+    Serial.println("Received Telegram message: " + text);
+  
+    // Only process messages from the authorized chat ID
+    if (chatId != CHAT_ID) {
+      bot.sendMessage(chatId, "Unauthorized access.", "");
+      Serial.println("Unauthorized Telegram access from: " + chatId);
+      continue;
+    }
+    
+    if (text == "/fan slow") {
+      setFanSpeed(0, "Slow");
+      blinkLED(3);
+    } else if (text == "/fan medium") {
+      setFanSpeed(170, "Medium");
+      blinkLED(2);
+    } else if (text == "/fan fast") {
+      setFanSpeed(255, "Fast");
+      blinkLED(1);
+    } else if (text == "/status") {
+      sendStatus();
+    } else {
+      String keyboardJson = "[[\"/fan slow\", \"/fan medium\"], [\"/fan fast\"], [\"/status\"]]";
+      bot.sendMessageWithReplyKeyboard(chatId, "Choose a command:", "", keyboardJson, true);
+    }
+  }
+}
+
+// Send current sensor values and fan status via Telegram (/status command)
+void sendStatus() {
+  float temp = dht.readTemperature();
+  float hum = dht.readHumidity();
+  
+  String message;
+  if (!isnan(temp) && !isnan(hum)) {
+    message = "🌡 Temp: " + String(temp, 1) + "°C\n" +
+              "💧 Humidity: " + String(hum, 1) + "%\n" +
+              "🌀 Fan: " + fanMode + "\n" +
+              "⚙️ RPM: " + String(rpm);
+  } else {
+    message = "❌ Failed to read from DHT22 sensor.";
+  }
+  bot.sendMessage(CHAT_ID, message, "");
+  Serial.println("Status Sent: " + message);
+}
+
+// Send sensor data (and fan status) to the external website (v0 endpoint)
+void sendWebsiteData() {
+  float temp = dht.readTemperature();
+  float hum = dht.readHumidity();
+  
+  if (isnan(temp) || isnan(hum)) {
+    Serial.println("[Website] DHT22 read error");
+    return;
+  }
+  
+  HTTPClient http;
+  http.begin(serverUrl);
+  http.addHeader("Content-Type", "application/json");
+  
+  StaticJsonDocument<256> doc;
+  doc["temperature"] = temp;
+  doc["humidity"] = hum;
+  doc["fanMode"] = fanMode;
+  doc["rpm"] = rpm;
+  
+  String payload;
+  serializeJson(doc, payload);
+  Serial.println("[Website] Sending: " + payload);
+  
+  int code = http.POST(payload);
+  if (code > 0) {
+    Serial.println("[Website] Response: " + http.getString());
+  } else {
+    Serial.println("[Website] POST failed: " + String(code));
+  }
+  
+  http.end();
+}
+
+// ----------------------------
+// Web Server Handlers for Local Dashboard
+// ----------------------------
+
+// Main page handler that displays sensor data and fan status along with control buttons
+void handleRoot() {
+  char page[2500];
+  String currentTime = getFormattedTime();
+  float temp = dht.readTemperature();
+  float hum = dht.readHumidity();
+  
+  snprintf(page, sizeof(page),
+    "<html>\
+      <head>\
+        <meta http-equiv='refresh' content='4'/>\
+        <meta name='viewport' content='width=device-width, initial-scale=1'>\
+        <link rel='stylesheet' href='https://use.fontawesome.com/releases/v5.7.2/css/all.css'>\
+        <title>ESP32 Fan Controller Dashboard</title>\
+        <style>\
+          html { font-family: Arial; text-align: center; background-color: #f0f0f0; }\
+          h2 { font-size: 2.5rem; margin-top: 20px; }\
+          p { font-size: 1.5rem; margin: 10px; }\
+          .card { background: white; padding: 20px; border-radius: 10px; margin-top: 20px; box-shadow: 0px 0px 15px rgba(0,0,0,0.2); }\
+          .btn { display: inline-block; padding: 10px 20px; margin: 5px; text-decoration: none; color: white; border-radius: 5px; }\
+          .slow { background: #4CAF50; }\
+          .medium { background: #2196F3; }\
+          .fast { background: #f44336; }\
+        </style>\
+      </head>\
+      <body>\
+        <h2>ESP32 Fan Controller Dashboard</h2>\
+        <div class='card'>\
+          <p><i class='fas fa-thermometer-half' style='color:#ca3517;'></i> Temperature: %.1f &deg;C</p>\
+          <p><i class='fas fa-tint' style='color:#00add6;'></i> Humidity: %.1f &percnt;</p>\
+          <p><i class='fas fa-fan' style='color:#555'></i> Fan Speed: %s</p>\
+          <p><i class='fas fa-tachometer-alt' style='color:#333'></i> RPM: %d</p>\
+          <p>Last Updated: %s</p>\
+          <p>\
+            <a href='/setfan?mode=slow' class='btn slow'>Slow</a>\
+            <a href='/setfan?mode=medium' class='btn medium'>Medium</a>\
+            <a href='/setfan?mode=fast' class='btn fast'>Fast</a>\
+          </p>\
+        </div>\
+      </body>\
+    </html>",
+    temp, hum, fanMode.c_str(), rpm, currentTime.c_str());
+    
+  server.send(200, "text/html", page);
+}
+
+// Handler to update fan speed based on query parameter 'mode' from the local webpage
+void handleSetFan() {
+  if (server.hasArg("mode")) {
+    String mode = server.arg("mode");
+    if (mode == "slow") {
+      setFanSpeed(0, "Slow");
+    } else if (mode == "medium") {
+      setFanSpeed(170, "Medium");
+    } else if (mode == "fast") {
+      setFanSpeed(255, "Fast");
+    }
+    // Redirect back to the dashboard after fan mode change
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+    return;
+  }
+  server.send(400, "text/plain", "Bad Request");
+}
+
+// Get current formatted time (from NTP sync) for display in the dashboard
+String getFormattedTime() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    return "Time not available";
+  }
+  char buf[30];
+  strftime(buf, sizeof(buf), "%Y-%m-%d %I:%M:%S %p", &timeinfo);
+  return String(buf);
+}

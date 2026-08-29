@@ -1,0 +1,81 @@
+#include <Arduino.h>
+#include <IRremoteESP8266.h>
+#include <IRsend.h>
+#include <ir_Coolix.h>
+#include <BluetoothSerial.h>
+
+#define IR_LED_PIN 4  // GPIO pin connected to IR LED
+
+IRCoolixAC ac(IR_LED_PIN);
+BluetoothSerial SerialBT;
+
+// Internal State settings
+bool powerFlag = false;
+bool turboFlag = false;
+bool ledFlag = true;
+bool swingFlag = false;
+
+uint8_t savedFan = kCoolixFanAuto;
+uint8_t savedTemp = 24; // default temperature
+uint8_t savedMode = kCoolixCool; // default mode (cool)
+
+void updateACState() {
+  if (powerFlag) ac.on();
+  else ac.off();
+
+  ac.setFan(savedFan);
+  ac.setTemp(savedTemp);
+  ac.setMode(savedMode);
+
+  if (turboFlag) ac.setTurbo(); // only if enabled
+  if (ledFlag) ac.setLed();
+  if (swingFlag) ac.setSwing();
+
+  ac.send();
+}
+
+void processCommand(String cmd) {
+  cmd.trim();
+  cmd.toLowerCase();
+
+  if (cmd == "on") powerFlag = true;
+  else if (cmd == "off") powerFlag = false;
+
+  else if (cmd == "turbo on") turboFlag = true;
+  else if (cmd == "turbo off") turboFlag = false;
+
+  else if (cmd == "led on") ledFlag = true;
+  else if (cmd == "led off") ledFlag = false;
+
+  else if (cmd == "swing on") swingFlag = true;
+  else if (cmd == "swing off") swingFlag = false;
+
+  else if (cmd == "fan auto") savedFan = kCoolixFanAuto;
+  else if (cmd == "fan high") savedFan = kCoolixFanMax;
+
+  else if (cmd == "mode cool") savedMode = kCoolixCool;
+  else if (cmd == "mode dry") savedMode = kCoolixDry;
+  else if (cmd == "mode auto") savedMode = kCoolixAuto;
+
+  else if (cmd.startsWith("temp ")) {
+    int t = cmd.substring(5).toInt();
+    if (t >= 16 && t <= 30) savedTemp = t;
+  }
+
+  updateACState();
+  SerialBT.println("AC state updated.");
+}
+
+void setup() {
+  Serial.begin(115200);
+  SerialBT.begin("ESP32-AC-REMOTE");
+  Serial.println("Bluetooth device started. Pair and send commands.");
+  ac.begin();
+}
+
+void loop() {
+  if (SerialBT.available()) {
+    String cmd = SerialBT.readStringUntil('\n');
+    processCommand(cmd);
+  }
+}

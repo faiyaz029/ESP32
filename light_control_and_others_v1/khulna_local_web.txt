@@ -1,0 +1,589 @@
+#include <WiFi.h>
+#include <ESPAsyncWebServer.h>
+#include <IRremoteESP8266.h>
+#include <IRsend.h>
+#include <ir_Coolix.h> // For AC control
+#include <ESPmDNS.h>
+#include <DHT.h>
+
+// Wi-Fi credentials
+const char* ssid = "Rush";
+const char* password = "01955593195";
+
+// IR setup
+const uint16_t kIrLedPin = 4;
+IRsend irsend(kIrLedPin);
+IRCoolixAC ac(kIrLedPin); // Using IRCoolixAC for AC
+
+// Sony IR Codes
+#define SONY_CODE_POWER       0xA90
+#define SONY_BITS_POWER       12
+#define SONY_CODE_VOL_UP      0x490
+#define SONY_BITS_VOL_UP      12
+#define SONY_CODE_VOL_DOWN    0xC90
+#define SONY_BITS_VOL_DOWN    12
+#define SONY_CODE_MUTE        0x290
+#define SONY_BITS_MUTE        12
+
+#define SONY_CODE_UP          0x2F0
+#define SONY_BITS_UP          12
+#define SONY_CODE_DOWN        0xAF0
+#define SONY_BITS_DOWN        12
+#define SONY_CODE_LEFT        0x2D0
+#define SONY_BITS_LEFT        12
+#define SONY_CODE_RIGHT       0xCD0
+#define SONY_BITS_RIGHT       12
+#define SONY_CODE_OK          0xA70
+#define SONY_BITS_OK          12
+
+#define SONY_CODE_HOME        0x70
+#define SONY_BITS_HOME        12
+#define SONY_CODE_OPTION      0x36E9
+#define SONY_BITS_OPTION      15
+#define SONY_CODE_RETURN      0x62E9
+#define SONY_BITS_RETURN      15
+
+#define SONY_CODE_INPUT_TOGGLE 0xA50
+#define SONY_BITS_INPUT_TOGGLE 12
+
+const int SONY_REPEATS = 2;
+
+// DHT22 and PWM light
+#define DHTPIN 13
+#define DHTTYPE DHT22
+#define LIGHT_PIN 33
+DHT dht(DHTPIN, DHTTYPE);
+int brightness = 0; // 0-255
+
+// Web server
+AsyncWebServer server(80);
+
+// HTML Page (Modified Version)
+const char* htmlPage = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>Khulna Home Control</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      margin: 0;
+      padding: 20px;
+      background-color: #1e1e1e; /* Dark background */
+      color: #e0e0e0; /* Light text */
+      line-height: 1.6;
+    }
+    .container {
+      max-width: 1000px;
+      margin: 0 auto;
+    }
+    h2 {
+      color: #00bcd4; /* Cyan accent for headers */
+      border-bottom: 2px solid #00bcd4;
+      padding-bottom: 10px;
+      margin-top: 40px;
+      margin-bottom: 20px;
+      font-size: 1.8em;
+    }
+    h2:first-child {
+      margin-top: 0;
+    }
+
+    /* Dashboard Styling */
+    .dashboard {
+      background-color: #2c2c2c; /* Darker card background */
+      padding: 20px;
+      border-radius: 12px;
+      box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+      margin-bottom: 30px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 15px;
+    }
+    .dashboard p {
+      margin: 5px 0;
+      font-size: 1.1em;
+    }
+    .dashboard span {
+      font-weight: bold;
+      color: #80deea; /* Lighter cyan for values */
+    }
+
+    /* General Remote Section Styling */
+    .remote-section {
+      background-color: #2c2c2c;
+      padding: 20px;
+      border-radius: 12px;
+      box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+      margin-bottom: 30px;
+    }
+
+    /* Main Controls Grid (TV and AC side-by-side on larger screens) */
+    .controls-main-grid {
+      display: grid;
+      grid-template-columns: 1fr; /* Default to single column */
+      gap: 30px;
+    }
+
+    @media (min-width: 768px) { /* Two columns for wider screens */
+      .controls-main-grid {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+
+    /* General Button Styling */
+    button {
+      padding: 12px 15px;
+      font-size: 1em;
+      border: none;
+      border-radius: 8px;
+      background-color: #007bff; /* Primary button blue */
+      color: white;
+      cursor: pointer;
+      transition: background-color 0.2s ease, transform 0.1s ease;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+    }
+    button:hover {
+      background-color: #0056b3; /* Darker blue on hover */
+    }
+    button:active {
+      transform: translateY(1px);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+    }
+
+    /* TV Remote Layout */
+    .tv-remote .control-group {
+      margin-bottom: 20px;
+    }
+    .tv-remote .control-group h3 {
+      font-size: 0.9em;
+      color: #bdbdbd;
+      text-transform: uppercase;
+      margin-bottom: 10px;
+      text-align: center;
+    }
+
+    .tv-top-controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+     .tv-top-controls button.power { background-color: #d32f2f; }
+     .tv-top-controls button.power:hover { background-color: #b71c1c; }
+     .tv-top-controls button.input { background-color: #4CAF50; }
+     .tv-top-controls button.input:hover { background-color: #388E3C; }
+
+
+    .tv-main-area {
+      display: grid;
+      grid-template-columns: 1fr 1.5fr 1fr; /* Volume | D-Pad | Menu */
+      gap: 20px;
+      align-items: center;
+    }
+    
+    .tv-volume-controls, .tv-menu-controls {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 10px;
+    }
+
+    .d-pad {
+      display: grid;
+      grid-template-areas:
+        ". up ."
+        "left ok right"
+        ". down .";
+      grid-template-columns: 1fr 1fr 1fr;
+      grid-template-rows: auto auto auto;
+      gap: 10px;
+      justify-items: center;
+    }
+    .d-pad button { width: 100%; height: 50px; }
+    .d-pad .up { grid-area: up; }
+    .d-pad .left { grid-area: left; }
+    .d-pad .ok { grid-area: ok; background-color: #ff9800; } /* Orange for OK */
+    .d-pad .ok:hover { background-color: #f57c00; }
+    .d-pad .right { grid-area: right; }
+    .d-pad .down { grid-area: down; }
+
+    /* AC Remote Layout */
+    .ac-remote .control-group {
+      margin-bottom: 20px;
+    }
+    .ac-power-controls {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+    .ac-power-controls .ac-on { background-color: #4CAF50; }
+    .ac-power-controls .ac-on:hover { background-color: #388E3C; }
+    .ac-power-controls .ac-off { background-color: #d32f2f; }
+    .ac-power-controls .ac-off:hover { background-color: #b71c1c; }
+
+    .ac-mode-fan-controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+      gap: 10px;
+    }
+
+    /* Slider Styling */
+    .slider-container {
+      margin: 25px 0;
+      padding: 15px;
+      background: #3a3a3a; /* Slightly lighter dark for slider background */
+      border-radius: 8px;
+    }
+    .slider-container label {
+      display: block;
+      margin-bottom: 10px;
+      font-size: 1.1em;
+    }
+    input[type="range"] {
+      width: 100%;
+      cursor: pointer;
+      -webkit-appearance: none;
+      appearance: none;
+      height: 10px;
+      background: #555;
+      border-radius: 5px;
+      outline: none;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 22px;
+      height: 22px;
+      background: #00bcd4; /* Cyan thumb */
+      border-radius: 50%;
+      cursor: pointer;
+      border: 2px solid #1e1e1e;
+    }
+    input[type="range"]::-moz-range-thumb {
+      width: 20px;
+      height: 20px;
+      background: #00bcd4;
+      border-radius: 50%;
+      cursor: pointer;
+      border: 2px solid #1e1e1e;
+    }
+
+    /* Light Controls */
+    .light-onoff-buttons {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+    .light-onoff-buttons .light-on { background-color: #ffeb3b; color: #333;} /* Yellow for light ON */
+    .light-onoff-buttons .light-on:hover { background-color: #fdd835;}
+    .light-onoff-buttons .light-off { background-color: #607d8b;}
+    .light-onoff-buttons .light-off:hover { background-color: #546e7a;}
+  </style>
+</head>
+<body>
+<div class="container">
+  <h2>Dashboard</h2>
+  <div class="dashboard">
+    <p>Brightness: <span id="brightnessVal">0</span></p>
+    <p>Temperature: <span id="tempVal">--</span> &deg;C</p>
+    <p>Humidity: <span id="humidityVal">--</span> %</p>
+  </div>
+
+  <div class="controls-main-grid">
+    <section class="remote-section tv-controls-section">
+      <h2>TV Controls</h2>
+      <div class="tv-remote">
+        <div class="tv-top-controls">
+          <button class="power" onclick="sendCmd('TV_POWER')">Power</button>
+          <button class="input" onclick="sendCmd('TV_INPUT')">Input Cycle</button>
+        </div>
+
+        <div class="tv-main-area">
+          <div class="tv-volume-controls">
+            <h3>Volume</h3>
+            <button onclick="sendCmd('TV_VOLUP')">Vol +</button>
+            <button onclick="sendCmd('TV_MUTE')">Mute</button>
+            <button onclick="sendCmd('TV_VOLDOWN')">Vol -</button>
+          </div>
+
+          <div class="d-pad">
+            <button class="up" onclick="sendCmd('TV_UP')">Up</button>
+            <button class="left" onclick="sendCmd('TV_LEFT')">Left</button>
+            <button class="ok" onclick="sendCmd('TV_OK')">OK</button>
+            <button class="right" onclick="sendCmd('TV_RIGHT')">Right</button>
+            <button class="down" onclick="sendCmd('TV_DOWN')">Down</button>
+          </div>
+
+          <div class="tv-menu-controls">
+            <h3>Menu</h3>
+            <button onclick="sendCmd('TV_HOME')">Home</button>
+            <button onclick="sendCmd('TV_OPTION')">Option</button>
+            <button onclick="sendCmd('TV_RETURN')">Return</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="remote-section ac-controls-section">
+      <h2>AC Controls</h2>
+      <div class="ac-remote">
+        <div class="ac-power-controls">
+          <button class="ac-on" onclick="sendCmd('AC_ON')">AC ON</button>
+          <button class="ac-off" onclick="sendCmd('AC_OFF')">AC OFF</button>
+        </div>
+
+        <div class="slider-container">
+          <label>AC Temperature: <span id="acTempVal">22</span> &deg;C</label>
+          <input type="range" min="16" max="30" value="22" id="acTempSlider" oninput="setACTemp(this.value)">
+        </div>
+        
+        <div class="control-group">
+          <h3>Mode</h3>
+          <div class="ac-mode-fan-controls">
+            <button onclick="sendCmd('AC_MODE_COOL')">Cool</button>
+            <button onclick="sendCmd('AC_MODE_HEAT')">Heat</button>
+            <button onclick="sendCmd('AC_MODE_DRY')">Dry</button>
+          </div>
+        </div>
+        
+        <div class="control-group">
+          <h3>Fan Speed</h3>
+          <div class="ac-mode-fan-controls">
+            <button onclick="sendCmd('AC_FAN_LOW')">Low</button>
+            <button onclick="sendCmd('AC_FAN_MED')">Medium</button> 
+            <button onclick="sendCmd('AC_FAN_HIGH')">High</button>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <section class="remote-section light-controls-section">
+    <h2>Light Control</h2>
+    <div class="light-controls">
+        <div class="light-onoff-buttons">
+            <button class="light-on" onclick="setBrightness(255)">Light ON</button>
+            <button class="light-off" onclick="setBrightness(0)">Light OFF</button>
+        </div>
+        <div class="slider-container">
+            <label>Light Brightness: <span id="lightVal">0</span></label>
+            <input type="range" min="0" max="255" value="0" id="lightSlider" oninput="setBrightness(this.value)">
+        </div>
+    </div>
+  </section>
+
+</div>
+
+<script>
+function sendCmd(cmd) {
+  fetch(`/cmd?do=${encodeURIComponent(cmd)}`) // Encoded cmd just in case
+    .then(response => response.text())
+    .then(text => {
+      console.log(`Sent: ${cmd}, Response: ${text}`);
+      if (cmd === 'GET_STATUS') {
+        const lines = text.split('\\n'); // Assuming C++ sends literal \n in the string
+        lines.forEach(line => {
+          const parts = line.split(': ');
+          if (parts.length === 2) {
+            const key = parts[0].trim();
+            const value = parts[1].trim();
+            if (key === 'Brightness') {
+              document.getElementById('brightnessVal').textContent = value;
+            } else if (key === 'Temperature') {
+              document.getElementById('tempVal').textContent = value.split(' ')[0];
+            } else if (key === 'Humidity') {
+              document.getElementById('humidityVal').textContent = value.split(' ')[0];
+            }
+          }
+        });
+      }
+    })
+    .catch(error => console.error('Error sending command:', error));
+}
+
+function setBrightness(val) {
+  const numVal = parseInt(val, 10);
+  document.getElementById('lightVal').textContent = numVal;
+  document.getElementById('brightnessVal').textContent = numVal; 
+  document.getElementById('lightSlider').value = numVal;
+  sendCmd(`LIGHT_${numVal}`);
+}
+
+function setACTemp(val) {
+  const numVal = parseInt(val, 10);
+  document.getElementById('acTempVal').textContent = numVal;
+  sendCmd(`AC_TEMP_${numVal}`);
+}
+
+function updateSensorData() {
+  sendCmd('GET_STATUS');
+}
+
+// Initial sensor data fetch and periodic updates
+window.onload = function() {
+  updateSensorData(); // Initial fetch
+  setInterval(updateSensorData, 5000); // Periodic fetch every 5 seconds
+
+  // Set initial slider positions based on displayed values from first GET_STATUS
+  // This might be slightly delayed, consider updating after GET_STATUS callback if precise sync is needed
+  setTimeout(() => {
+      const initialBrightness = document.getElementById('brightnessVal').textContent;
+      if (initialBrightness !== '0') { // Check if it's not the default '0' or '--'
+        const brightVal = parseInt(initialBrightness, 10);
+        if (!isNaN(brightVal)) {
+            document.getElementById('lightSlider').value = brightVal;
+            document.getElementById('lightVal').textContent = brightVal;
+        }
+      }
+  }, 1000); // Small delay to allow first GET_STATUS to potentially populate
+};
+</script>
+</body>
+</html>
+)rawliteral";
+
+// Helper: send Sony command with repeats
+void sendSonyCmd(uint16_t code, uint16_t bits) {
+  irsend.sendSony(code, bits, SONY_REPEATS);
+  delay(40); // Small delay after sending Sony command
+}
+
+// Helper: send Sony input toggle multiple times with delay (kept for potential future use, not used by current HTML)
+void sendSonyInputToggleRepeated(int times) {
+  for (int i = 0; i < times; i++) {
+    irsend.sendSony(SONY_CODE_INPUT_TOGGLE, SONY_BITS_INPUT_TOGGLE, SONY_REPEATS);
+    delay(500); // Delay between repeated input toggles
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  irsend.begin();
+  ac.begin(); // Initialize AC object
+  ac.on(); // Default AC state to ON, then can be controlled. Or keep it off.
+  ac.setFan(kCoolixFanMin); // Default fan
+  ac.setMode(kCoolixCool);  // Default mode
+  ac.setTemp(24);           // Default temp
+  // ac.send(); // Send initial state if needed, or wait for user command
+
+  dht.begin();
+
+  // Setup PWM for light control on channel 0
+  ledcAttachPin(LIGHT_PIN, 0); // Attach pin to channel
+  ledcSetup(0, 5000, 8);       // channel 0, 5kHz, 8-bit resolution
+  ledcWrite(0, brightness);    // Set initial brightness
+
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nConnected! IP: " + WiFi.localIP().toString());
+
+  if (MDNS.begin("faiyaz")) { // hostname for mDNS
+    Serial.println("mDNS responder started at http://faiyaz.local");
+  } else {
+    Serial.println("Error starting mDNS");
+  }
+
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send(200, "text/html", htmlPage);
+  });
+
+  server.on("/cmd", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (!request->hasParam("do")) {
+      request->send(400, "text/plain", "Missing command");
+      return;
+    }
+    String cmd = request->getParam("do")->value();
+    cmd.trim();
+    Serial.println("Received command: " + cmd);
+
+    bool acCommandSent = false;
+
+    // TV Controls
+    if (cmd == "TV_POWER") sendSonyCmd(SONY_CODE_POWER, SONY_BITS_POWER);
+    else if (cmd == "TV_VOLUP") sendSonyCmd(SONY_CODE_VOL_UP, SONY_BITS_VOL_UP);
+    else if (cmd == "TV_VOLDOWN") sendSonyCmd(SONY_CODE_VOL_DOWN, SONY_BITS_VOL_DOWN);
+    else if (cmd == "TV_MUTE") sendSonyCmd(SONY_CODE_MUTE, SONY_BITS_MUTE);
+    else if (cmd == "TV_UP") sendSonyCmd(SONY_CODE_UP, SONY_BITS_UP);
+    else if (cmd == "TV_DOWN") sendSonyCmd(SONY_CODE_DOWN, SONY_BITS_DOWN);
+    else if (cmd == "TV_LEFT") sendSonyCmd(SONY_CODE_LEFT, SONY_BITS_LEFT);
+    else if (cmd == "TV_RIGHT") sendSonyCmd(SONY_CODE_RIGHT, SONY_BITS_RIGHT);
+    else if (cmd == "TV_OK") sendSonyCmd(SONY_CODE_OK, SONY_BITS_OK);
+    else if (cmd == "TV_HOME") sendSonyCmd(SONY_CODE_HOME, SONY_BITS_HOME);
+    else if (cmd == "TV_OPTION") sendSonyCmd(SONY_CODE_OPTION, SONY_BITS_OPTION);
+    else if (cmd == "TV_RETURN") sendSonyCmd(SONY_CODE_RETURN, SONY_BITS_RETURN);
+    else if (cmd == "TV_INPUT") sendSonyCmd(SONY_CODE_INPUT_TOGGLE, SONY_BITS_INPUT_TOGGLE);
+    // Removed HDMI1, HDMI2, ScreenShare direct commands as buttons are removed from HTML
+    // else if (cmd == "TV_HDMI1") sendSonyInputToggleRepeated(2); // Kept in case of future use
+    // else if (cmd == "TV_HDMI2") sendSonyInputToggleRepeated(3); // Kept in case of future use
+    // else if (cmd == "TV_SCREENSHARE") sendSonyInputToggleRepeated(4); // Kept in case of future use
+
+    // AC Controls
+    else if (cmd == "AC_ON") { ac.on(); acCommandSent = true; }
+    else if (cmd == "AC_OFF") { ac.off(); acCommandSent = true; }
+    else if (cmd == "AC_MODE_COOL") { ac.setMode(kCoolixCool); acCommandSent = true; }
+    else if (cmd == "AC_MODE_HEAT") { ac.setMode(kCoolixHeat); acCommandSent = true; } // Assuming kCoolixHeat exists
+    else if (cmd == "AC_MODE_DRY") { ac.setMode(kCoolixDry); acCommandSent = true; }
+    else if (cmd.startsWith("AC_TEMP_")) {
+      int temp = cmd.substring(8).toInt();
+      if (temp >= 16 && temp <= 30) { // Typical AC temp range
+        ac.setTemp(temp);
+        acCommandSent = true;
+      }
+    }
+    else if (cmd == "AC_FAN_LOW") { ac.setFan(kCoolixFanMin); acCommandSent = true; }
+    else if (cmd == "AC_FAN_MED") { ac.setFan(kCoolixFanMed); acCommandSent = true; } // Corrected from AC_FAN_AUTO if it was for Med
+    else if (cmd == "AC_FAN_HIGH") { ac.setFan(kCoolixFanMax); acCommandSent = true; }
+
+    // Light Control
+    else if (cmd.startsWith("LIGHT_")) {
+      int val = cmd.substring(6).toInt();
+      val = constrain(val, 0, 255); // Constrain value
+      brightness = val;
+      ledcWrite(0, brightness); // Apply brightness to LED
+    }
+
+    // Sensor Data
+    else if (cmd == "GET_STATUS") {
+      float t = dht.readTemperature();
+      float h = dht.readHumidity();
+      String resp = "Brightness: " + String(brightness);
+      if (!isnan(t)) {
+        resp += "\\nTemperature: " + String(t, 1) + " C"; // Using \n for JS split
+      } else {
+        resp += "\\nTemperature: N/A";
+      }
+      if (!isnan(h)) {
+        resp += "\\nHumidity: " + String(h, 1) + " %";
+      } else {
+        resp += "\\nHumidity: N/A";
+      }
+      request->send(200, "text/plain", resp);
+      return; // Important: return here to not send the generic "Sent: cmd"
+    }
+
+    // If an AC command was processed, send the IR signal
+    if (acCommandSent) {
+      ac.send();
+      delay(200); // Small delay after sending AC command
+    }
+
+    request->send(200, "text/plain", "Sent: " + cmd);
+  });
+
+  server.begin();
+  Serial.println("HTTP server started");
+}
+
+void loop() {
+  // ESPAsyncWebServer handles requests asynchronously. No need for code here for that.
+  // MDNS.update(); // Not strictly necessary for ESPAsyncWebServer, but good practice for some mDNS libraries if issues arise.
+}

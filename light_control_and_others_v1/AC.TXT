@@ -1,0 +1,41 @@
+#include <IRremoteESP8266.h>
+#include <IRsend.h>
+#include <ir_Coolix.h>       // Coolix protocol (RG57A7/BGEF)
+#include "BluetoothSerial.h" // ESP32 Bluetooth
+
+const uint16_t kIrLedPin = 4;  // IR LED connected to GPIO 4 (change if needed)
+IRCoolixAC ac(kIrLedPin);
+BluetoothSerial SerialBT;
+
+void setup() {
+  Serial.begin(115200);
+  SerialBT.begin("ESP32-AC"); // Bluetooth name
+  ac.begin();
+
+  Serial.println("Bluetooth IR AC Control Started");
+  Serial.println("Send 'on' to turn AC ON");
+  Serial.println("Send 'off' to turn AC OFF");
+}
+
+void loop() {
+  if (SerialBT.available()) {
+    String cmd = SerialBT.readStringUntil('\n');
+    cmd.trim();
+    cmd.toLowerCase();
+
+    if (cmd == "on") {
+      Serial.println("Turning AC ON");
+      ac.on();
+      ac.setMode(kCoolixCool);
+      ac.setFan(kCoolixFanAuto);
+      ac.setTemp(24);  // Default temp
+      ac.send();
+    } else if (cmd == "off") {
+      Serial.println("Turning AC OFF");
+      ac.off();
+      ac.send();
+    } else {
+      Serial.println("Unknown command. Use 'on' or 'off'");
+    }
+  }
+}

@@ -1,0 +1,185 @@
+#include <BluetoothSerial.h>
+#include <IRremoteESP8266.h>
+#include <IRsend.h>
+#include <ir_Coolix.h>
+#include <DHT.h>
+
+// Bluetooth setup
+BluetoothSerial SerialBT;
+
+// IR setup
+const uint16_t kIrLedPin = 4;
+IRsend irsend(kIrLedPin);
+IRCoolixAC ac(kIrLedPin);
+
+// Sony IR Codes
+#define SONY_CODE_POWER         0xA90
+#define SONY_BITS_POWER         12
+#define SONY_CODE_VOL_UP        0x490
+#define SONY_BITS_VOL_UP        12
+#define SONY_CODE_VOL_DOWN      0xC90
+#define SONY_BITS_VOL_DOWN      12
+#define SONY_CODE_MUTE          0x290
+#define SONY_BITS_MUTE          12
+
+#define SONY_CODE_UP            0x2F0
+#define SONY_BITS_UP            12
+#define SONY_CODE_DOWN          0xAF0
+#define SONY_BITS_DOWN          12
+#define SONY_CODE_LEFT          0x2D0
+#define SONY_BITS_LEFT          12
+#define SONY_CODE_RIGHT         0xCD0
+#define SONY_BITS_RIGHT         12
+#define SONY_CODE_OK            0xA70
+#define SONY_BITS_OK            12
+
+#define SONY_CODE_HOME          0x70
+#define SONY_BITS_HOME          12
+#define SONY_CODE_OPTION        0x36E9
+#define SONY_BITS_OPTION        15
+#define SONY_CODE_RETURN        0x62E9
+#define SONY_BITS_RETURN        15
+
+#define SONY_CODE_INPUT_TOGGLE  0xA50
+#define SONY_BITS_INPUT_TOGGLE  12
+
+const int SONY_REPEATS = 2;
+
+// DHT22 and PWM light
+#define DHTPIN 13
+#define DHTTYPE DHT22
+#define LIGHT_PIN 33
+DHT dht(DHTPIN, DHTTYPE);
+int brightness = 0; // 0-255
+
+// Helper: send Sony command with repeats
+void sendSonyCmd(uint16_t code, uint16_t bits) {
+  irsend.sendSony(code, bits, SONY_REPEATS);
+}
+
+// Helper: send Sony input toggle multiple times with delay
+void sendSonyInputToggleRepeated(int times) {
+  for (int i = 0; i < times; i++) {
+    irsend.sendSony(SONY_CODE_INPUT_TOGGLE, SONY_BITS_INPUT_TOGGLE, SONY_REPEATS);
+    delay(500);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  SerialBT.begin("ESP32_Control"); // Bluetooth device name
+  Serial.println("Bluetooth started. Pair with device: ESP32_Control");
+
+  irsend.begin();
+  ac.begin();
+  dht.begin();
+
+  // Setup PWM for light control on channel 0
+  ledcAttachPin(LIGHT_PIN, 0);
+  ledcSetup(0, 5000, 8);
+  ledcWrite(0, brightness);
+}
+
+void loop() {
+  if (SerialBT.available()) {
+    String cmd = SerialBT.readStringUntil('\n');
+    cmd.trim();
+
+    if (cmd == "TV_POWER") sendSonyCmd(SONY_CODE_POWER, SONY_BITS_POWER);
+    else if (cmd == "TV_VOLUP") sendSonyCmd(SONY_CODE_VOL_UP, SONY_BITS_VOL_UP);
+    else if (cmd == "TV_VOLDOWN") sendSonyCmd(SONY_CODE_VOL_DOWN, SONY_BITS_VOL_DOWN);
+    else if (cmd == "TV_MUTE") sendSonyCmd(SONY_CODE_MUTE, SONY_BITS_MUTE);
+
+    else if (cmd == "TV_UP") sendSonyCmd(SONY_CODE_UP, SONY_BITS_UP);
+    else if (cmd == "TV_DOWN") sendSonyCmd(SONY_CODE_DOWN, SONY_BITS_DOWN);
+    else if (cmd == "TV_LEFT") sendSonyCmd(SONY_CODE_LEFT, SONY_BITS_LEFT);
+    else if (cmd == "TV_RIGHT") sendSonyCmd(SONY_CODE_RIGHT, SONY_BITS_RIGHT);
+    else if (cmd == "TV_OK") sendSonyCmd(SONY_CODE_OK, SONY_BITS_OK);
+
+    else if (cmd == "TV_HOME") sendSonyCmd(SONY_CODE_HOME, SONY_BITS_HOME);
+    else if (cmd == "TV_OPTION") sendSonyCmd(SONY_CODE_OPTION, SONY_BITS_OPTION);
+    else if (cmd == "TV_RETURN") sendSonyCmd(SONY_CODE_RETURN, SONY_BITS_RETURN);
+
+    else if (cmd == "TV_INPUT") sendSonyCmd(SONY_CODE_INPUT_TOGGLE, SONY_BITS_INPUT_TOGGLE);
+    else if (cmd == "TV_HDMI1") sendSonyInputToggleRepeated(2);
+    else if (cmd == "TV_HDMI2") sendSonyInputToggleRepeated(3);
+    else if (cmd == "TV_SCREENSHARE") sendSonyInputToggleRepeated(4);
+
+    else if (cmd == "AC_ON") ac.on();
+    else if (cmd == "AC_OFF") ac.off();
+    else if (cmd == "AC_MODE_COOL") ac.setMode(kCoolixCool);
+    else if (cmd == "AC_MODE_HEAT") ac.setMode(kCoolixHeat);
+    else if (cmd == "AC_MODE_DRY") ac.setMode(kCoolixDry);
+    else if (cmd == "AC_FAN_LOW") ac.setFan(kCoolixFanMin);
+    else if (cmd == "AC_FAN_MED") ac.setFan(kCoolixFanMed);
+    else if (cmd == "AC_FAN_HIGH") ac.setFan(kCoolixFanMax);
+    else if (cmd.startsWith("AC_TEMP_")) {
+      int temp = cmd.substring(8).toInt();
+      if (temp >= 16 && temp <= 30) ac.setTemp(temp);
+    }
+    else if (cmd.startsWith("LIGHT_")) {
+      int val = cmd.substring(6).toInt();
+      val = constrain(val, 0, 255);
+      brightness = val;
+      ledcWrite(0, brightness);
+    }
+    else if (cmd == "GET_STATUS") {
+      float t = dht.readTemperature();
+      float h = dht.readHumidity();
+      String resp = "Brightness: " + String(brightness);
+      if (!isnan(t)) resp += "\nTemperature: " + String(t) + " °C";
+      if (!isnan(h)) resp += "\nHumidity: " + String(h) + " %";
+      SerialBT.println(resp);
+      return;
+    }
+
+    // For AC commands, send the IR signal
+    if (cmd.startsWith("AC_")) ac.send();
+
+    SerialBT.println("Sent: " + cmd);
+  }
+}
+
+
+
+
+
+TV Control Commands (Sony IR Protocol)
+Power: TV_POWER\n - Toggles the TV power on/off.
+Volume Up: TV_VOLUP\n - Increases the TV volume.
+Volume Down: TV_VOLDOWN\n - Decreases the TV volume.
+Mute: TV_MUTE\n - Mutes/unmutes the TV.
+Navigation Up: TV_UP\n - Moves the TV cursor up.
+Navigation Down: TV_DOWN\n - Moves the TV cursor down.
+Navigation Left: TV_LEFT\n - Moves the TV cursor left.
+Navigation Right: TV_RIGHT\n - Moves the TV cursor right.
+OK/Select: TV_OK\n - Selects the current option on the TV.
+Home: TV_HOME\n - Opens the TV's home menu.
+Option: TV_OPTION\n - Opens the TV's options menu.
+Return: TV_RETURN\n - Goes back to the previous menu.
+Input Toggle: TV_INPUT\n - Toggles between TV input sources.
+HDMI 1: TV_HDMI1\n - Switches to HDMI 1 input (sends input toggle 2 times).
+HDMI 2: TV_HDMI2\n - Switches to HDMI 2 input (sends input toggle 3 times).
+Screen Share: TV_SCREENSHARE\n - Switches to screen share input (sends input toggle 4 times).
+AC Control Commands (Coolix Protocol)
+Turn On: AC_ON\n - Turns the air conditioner on.
+Turn Off: AC_OFF\n - Turns the air conditioner off.
+Cool Mode: AC_MODE_COOL\n - Sets the AC to cooling mode.
+Heat Mode: AC_MODE_HEAT\n - Sets the AC to heating mode.
+Dry Mode: AC_MODE_DRY\n - Sets the AC to dehumidifying mode.
+Fan Low: AC_FAN_LOW\n - Sets the AC fan speed to low.
+Fan Medium: AC_FAN_MED\n - Sets the AC fan speed to medium.
+Fan High: AC_FAN_HIGH\n - Sets the AC fan speed to high.
+Set Temperature: AC_TEMP_<value>\n - Sets the AC temperature (16–30°C). Examples:
+AC_TEMP_16\n - Sets temperature to 16°C.
+AC_TEMP_22\n - Sets temperature to 22°C.
+AC_TEMP_30\n - Sets temperature to 30°C.
+Light Control Commands
+Set Brightness: LIGHT_<value>\n - Sets the light brightness (0–255). Examples:
+LIGHT_0\n - Turns the light off (brightness 0).
+LIGHT_100\n - Sets brightness to 100.
+LIGHT_255\n - Sets maximum brightness.
+Light On: LIGHT_100\n - Turns the light on at brightness 100 (can use any value > 0).
+Light Off: LIGHT_0\n - Turns the light off.
+Sensor Data Command
+Get Status: GET_STATUS\n - Returns the current brightness, temperature, and humidity. Example response:

@@ -1,0 +1,73 @@
+#include <IRremoteESP8266.h>
+#include <IRsend.h>
+#include <ir_Coolix.h>
+#include "BluetoothSerial.h"
+
+const uint16_t kIrLedPin = 4;
+IRCoolixAC ac(kIrLedPin);
+BluetoothSerial SerialBT;
+
+void setup() {
+  Serial.begin(115200);
+  SerialBT.begin("ESP32-AC-Remote");
+
+  ac.begin();
+  ac.on();              // Start with AC on
+  ac.setTemp(24);       // Default temp
+  ac.setMode(kCoolixCool);
+  ac.setFan(kCoolixFanAuto);
+  ac.send();
+
+  Serial.println("AC Remote Ready. Bluetooth name: ESP32-AC-Remote");
+  Serial.println("Commands: on, off, mode [cool|heat|dry|auto], temp [17-30], fan [auto|low|med|high]");
+}
+
+void loop() {
+  if (SerialBT.available()) {
+    String input = SerialBT.readStringUntil('\n');
+    input.trim();
+    input.toLowerCase();
+
+    if (input == "on") {
+      ac.on();
+      Serial.println("AC turned ON");
+    } else if (input == "off") {
+      ac.off();
+      Serial.println("AC turned OFF");
+    } else if (input.startsWith("temp")) {
+      int t = input.substring(5).toInt();
+      if (t >= 17 && t <= 30) {
+        ac.setTemp(t);
+        Serial.printf("Temp set to %d°C\n", t);
+      } else {
+        Serial.println("Temp must be 17-30");
+      }
+    } else if (input.startsWith("mode")) {
+      String m = input.substring(5);
+      if (m == "cool") ac.setMode(kCoolixCool);
+      else if (m == "heat") ac.setMode(kCoolixHeat);
+      else if (m == "dry") ac.setMode(kCoolixDry);
+      else if (m == "auto") ac.setMode(kCoolixAuto);
+      else {
+        Serial.println("Invalid mode. Use cool, heat, dry, auto");
+        return;
+      }
+      Serial.println("Mode set to " + m);
+    } else if (input.startsWith("fan")) {
+      String f = input.substring(4);
+      if (f == "auto") ac.setFan(kCoolixFanAuto);
+      else if (f == "low") ac.setFan(kCoolixFanMin);
+      else if (f == "med") ac.setFan(kCoolixFanMed);
+      else if (f == "high") ac.setFan(kCoolixFanMax);
+      else {
+        Serial.println("Invalid fan. Use auto, low, med, high");
+        return;
+      }
+      Serial.println("Fan set to " + f);
+    } else {
+      Serial.println("Invalid command");
+    }
+
+    ac.send();  // Send IR signal after every valid change
+  }
+}

@@ -1,0 +1,66 @@
+// ESP32 Code: Control light brightness via Bluetooth and read DHT22 sensor
+
+#include <BluetoothSerial.h>
+#include <DHT.h>
+
+// Pin definitions
+#define DHTPIN 13
+#define DHTTYPE DHT22
+#define LIGHT_PIN 33
+
+BluetoothSerial SerialBT;
+DHT dht(DHTPIN, DHTTYPE);
+
+int brightness = 0; // 0-255
+
+void setup() {
+  Serial.begin(115200);
+  SerialBT.begin("fzESP"); // Bluetooth device name
+  dht.begin();
+
+  ledcAttachPin(LIGHT_PIN, 0); // Channel 0
+  ledcSetup(0, 5000, 8);       // 5 kHz PWM, 8-bit resolution
+  ledcWrite(0, brightness);
+
+  Serial.println("Bluetooth device is ready to pair");
+}
+
+void loop() {
+  if (SerialBT.available()) {
+    String cmd = SerialBT.readStringUntil('\n');
+    cmd.trim();
+
+    if (cmd.startsWith("l")) {
+      String numStr = cmd.substring(1);
+      if (numStr.length() > 0 && numStr.toInt() >= 0) {
+        int val = numStr.toInt();
+        val = constrain(val, 0, 255);
+        brightness = val;
+        ledcWrite(0, brightness);
+        SerialBT.println("Brightness set to " + String(brightness));
+      } else {
+        SerialBT.println("Invalid brightness value");
+      }
+
+    } else if (cmd == "t") {
+      float t = dht.readTemperature();
+      if (isnan(t)) SerialBT.println("Failed to read temperature");
+      else SerialBT.println("Temperature: " + String(t) + " C");
+
+    } else if (cmd == "h") {
+      float h = dht.readHumidity();
+      if (isnan(h)) SerialBT.println("Failed to read humidity");
+      else SerialBT.println("Humidity: " + String(h) + " %");
+
+    } else if (cmd == "s") {
+      float t = dht.readTemperature();
+      float h = dht.readHumidity();
+      SerialBT.println("Brightness: " + String(brightness));
+      if (!isnan(t)) SerialBT.println("Temperature: " + String(t) + " C");
+      if (!isnan(h)) SerialBT.println("Humidity: " + String(h) + " %");
+
+    } else {
+      SerialBT.println("Unknown command. Use l[0-255], t, h, or s");
+    }
+  }
+}

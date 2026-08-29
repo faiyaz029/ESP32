@@ -1,0 +1,521 @@
+// Merged version of fan controller and LED dimmer with web and Telegram control
+
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <UniversalTelegramBot.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <DHT.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
+#include <time.h>
+
+// WiFi credentials
+const char* ssid = "fzpc"; // Replace with your SSID
+const char* password = "29402011"; // Replace with your WiFi Password
+
+// Telegram settings
+#define BOT_TOKEN "8050439108:AAEXlV9xp2qI5HW-oisJUHrsrE5Rv2MvBv0" // Replace with your BOT_TOKEN
+#define CHAT_ID_1 "1360445792"    // Replace with your primary CHAT_ID
+#define CHAT_ID_2 "5085045218"    // Replace with your secondary CHAT_ID (or remove if not needed)
+WiFiClientSecure client;
+UniversalTelegramBot bot(BOT_TOKEN, client);
+bool onlineMessageSent2 = false;
+
+
+// DHT22 sensor
+#define DHTPIN 13
+#define DHTTYPE DHT22
+DHT dht(DHTPIN, DHTTYPE);
+
+// Fan settings
+#define FAN_PWM 32
+#define FAN_RPM 25
+#define FAN_PWM_CHANNEL 0
+
+// Light control settings
+#define LIGHT_PIN 33
+#define LIGHT_PWM_CHANNEL 1
+
+// General PWM settings
+#define PWM_FREQ 5000
+#define PWM_RESOLUTION 8
+
+// Onboard LED
+#define LED_PIN 2
+
+// External endpoint
+const char* serverUrl = "https://v0-esp32-weather-dashboard.vercel.app/api/readings"; // Your Vercel endpoint
+
+unsigned long lastRPMCheck = 0;
+unsigned long lastWebsiteSend = 0;
+const unsigned long websiteInterval = 20 * 60 * 1000UL; // 20 minutes
+unsigned long lastRestart = 0;
+const unsigned long restartInterval = 4UL * 60 * 60 * 1000UL; // 4 hours
+
+String fanMode = "Fast";
+int fanDuty = 255;
+volatile int pulseCount = 0;
+int rpm = 0;
+int lightLevel = 0;
+String lightMode = "Off";
+bool waveMode = false;
+unsigned long lastWave = 0;
+
+WebServer server(80);
+
+// Function prototypes (declare them before setup() so setup() can see them)
+void handleRoot();
+void handleSetFan();
+void handleSetLight();
+void handleNewMessages(int num);
+void sendStatus();
+void sendWebsiteData();
+void blinkLED(int times);
+
+
+void IRAM_ATTR rpmISR() { pulseCount++; }
+
+void setFanSpeed(int duty, const String &mode) {
+  fanDuty = duty;
+  fanMode = mode;
+  ledcWrite(FAN_PWM_CHANNEL, fanDuty);
+  // Telegram feedback is handled by the caller (handleNewMessages)
+}
+
+void setLightBrightness(int duty, const String &mode) {
+  waveMode = false; // Disable wave mode when setting specific brightness
+  lightLevel = duty;
+  lightMode = mode;
+  ledcWrite(LIGHT_PWM_CHANNEL, lightLevel);
+  // Telegram feedback is handled by the caller (handleNewMessages)
+}
+
+void setup() {
+  Serial.begin(115200);
+  dht.begin();
+  pinMode(LED_PIN, OUTPUT);
+
+  ledcSetup(FAN_PWM_CHANNEL, PWM_FREQ, PWM_RESOLUTION);
+  ledcAttachPin(FAN_PWM, FAN_PWM_CHANNEL);
+  ledcSetup(LIGHT_PWM_CHANNEL, PWM_FREQ, PWM_RESOLUTION);
+  ledcAttachPin(LIGHT_PIN, LIGHT_PWM_CHANNEL);
+
+  pinMode(FAN_RPM, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(FAN_RPM), rpmISR, FALLING);
+
+  WiFi.begin(ssid, password);
+  client.setCACert(TELEGRAM_CERTIFICATE_ROOT);
+  Serial.print("Connecting to WiFi...");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+
+  if (MDNS.begin("espfan")) {
+    Serial.println("mDNS started at http://espfan.local");
+  }
+  configTime(21600, 0, "pool.ntp.org"); // GMT+6 for Bangladesh Standard Time
+
+  server.on("/", handleRoot);
+  server.on("/setfan", handleSetFan);
+  server.on("/setlight", handleSetLight);
+  server.begin();
+  Serial.println("HTTP server started");
+
+  lastWebsiteSend = millis();
+  lastRestart = millis();
+  
+  setFanSpeed(255, "Fast"); // Default fan mode on startup
+  if (WiFi.status() == WL_CONNECTED) {
+      bot.sendMessage(CHAT_ID_1, "fz ESP Online", ""); // Fixed syntax error here
+  }
+  //sendStatus(); // Send full initial status
+}
+
+void loop() {
+  if (millis() - lastRPMCheck > 1000) {
+    rpm = (pulseCount * 60) / 2; // Assuming 2 pulses per revolution for fan RPM
+    pulseCount = 0;
+    lastRPMCheck = millis();
+  }
+
+  if (millis() - lastWebsiteSend > websiteInterval) {
+    sendWebsiteData();
+    blinkLED(4);  
+    lastWebsiteSend = millis();
+  }
+
+  if (millis() - lastRestart > restartInterval) {
+    bot.sendMessage(CHAT_ID_1, "⚠️ System restarting as scheduled.", "");
+    blinkLED(5);  
+    delay(1000);
+    ESP.restart();
+  }
+
+  if (waveMode && millis() - lastWave > 50) {  
+    lightLevel = (int)(127.5 * (sin(millis() / 500.0) + 1.0)); // Sine wave for brightness
+    ledcWrite(LIGHT_PWM_CHANNEL, lightLevel);
+    lastWave = millis();
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    int numNewMessages = bot.getUpdates(bot.last_message_received + 1);
+    while (numNewMessages) {
+      handleNewMessages(numNewMessages);
+      numNewMessages = bot.getUpdates(bot.last_message_received + 1);
+    }
+  }
+
+  server.handleClient();
+  delay(50);  
+}
+
+
+void handleNewMessages(int num) {
+  for (int i = 0; i < num; i++) {
+    String text = bot.messages[i].text;
+    String chatId = bot.messages[i].chat_id;
+    String fromName = bot.messages[i].from_name;
+    Serial.println("Received from " + fromName + " (" + chatId + "): " + text);
+
+    if (chatId == CHAT_ID_1) {
+      bool commandRecognized = true;
+      if (text == "/fan slow") {
+        setFanSpeed(85, "Slow");  
+        bot.sendMessage(chatId, "💨 Fan set to Slow (85)", "");
+      } else if (text == "/fan medium") {
+        setFanSpeed(170, "Medium");
+        bot.sendMessage(chatId, "💨 Fan set to Medium (170)", "");
+      } else if (text == "/fan fast") {
+        setFanSpeed(255, "Fast");
+        bot.sendMessage(chatId, "💨 Fan set to Fast (255)", "");
+      } else if (text == "/light dim") {
+        setLightBrightness(50, "Dim");
+        bot.sendMessage(chatId, "💡 Light set to Dim (50)", "");
+      } else if (text == "/light bright") {
+        setLightBrightness(255, "Bright");
+        bot.sendMessage(chatId, "💡 Light set to Bright (255)", "");
+      } else if (text == "/light off") {
+        setLightBrightness(0, "Off");
+        bot.sendMessage(chatId, "💡 Light turned Off (0)", "");
+      } else if (text == "/light wave") {
+        waveMode = true;
+        lightMode = "Wave";
+        bot.sendMessage(chatId, "💡 Light: Wave mode activated 🌊", "");
+      } else if (text == "/light increase") {
+        lightLevel = min(255, lightLevel + 25);
+        setLightBrightness(lightLevel, "Manual");
+        bot.sendMessage(chatId, "💡 Light brightness increased to " + String(lightLevel), "");
+      } else if (text == "/light decrease") {
+        lightLevel = max(0, lightLevel - 25);
+        setLightBrightness(lightLevel, "Manual");
+        bot.sendMessage(chatId, "💡 Light brightness decreased to " + String(lightLevel), "");
+      } else if (text.startsWith("/light ")) {
+        String valueStr = text.substring(7);
+        int value = valueStr.toInt();
+        if (valueStr.length() > 0 && value >= 0 && value <= 255) {  
+          setLightBrightness(value, "Manual");
+          bot.sendMessage(chatId, "💡 Light brightness set to " + String(value), "");
+        } else {
+          bot.sendMessage(chatId, "❓ Invalid brightness value. Use /light <0-255>.", "");
+          commandRecognized = false;
+        }
+      } else if (text == "/status") {
+        sendStatus();  
+      } else if (text == "/ARU_SIGNAL") {
+        bot.sendMessage(chatId, "❤️ARU_SIGNAL❤️ received!", "");
+        
+        // --- SOS Start (... --- ...) ---
+        // S (...): 3 short flashes
+        for (int j = 0; j < 3; j++) {  
+          setLightBrightness(255, "ARU_SIGNAL"); delay(200); // Short ON
+          setLightBrightness(0, "ARU_SIGNAL"); delay(200);   // Short OFF (intra-character space)
+        }
+        delay(400); // Inter-character space (e.g., space between S and O)
+
+        // O (---): 3 long flashes
+        for (int j = 0; j < 3; j++) {  
+          setLightBrightness(255, "ARU_SIGNAL"); delay(600); // Long ON
+          setLightBrightness(0, "ARU_SIGNAL"); delay(200);   // Short OFF (intra-character space)
+        }
+        delay(400); // Inter-character space (e.g., space between O and S)
+
+        // S (...): 3 short flashes
+        for (int j = 0; j < 3; j++) {  
+          setLightBrightness(255, "ARU_SIGNAL"); delay(200); // Short ON
+          setLightBrightness(0, "ARU_SIGNAL"); delay(200);   // Short OFF (intra-character space)
+        }
+        // --- SOS End ---
+
+        delay(1000); // Pause after the SOS sequence
+        setLightBrightness(0, "Off"); // Ensure light is off after SOS
+        
+      } else {
+        commandRecognized = false;
+        bot.sendMessage(chatId, "🤔 Unknown command. Try one of the options below.", "");
+      }
+
+      
+      String keyboard = "[[\"/fan slow\", \"/fan medium\", \"/fan fast\"], [\"/light dim\", \"/light bright\", \"/light off\"], [\"/light wave\", \"/light increase\", \"/light decrease\"], [\"/status\", \"/ARU_SIGNAL\"]]";
+      bot.sendMessageWithReplyKeyboard(chatId, "", "", keyboard, true);
+
+    } else if (chatId == CHAT_ID_2) {
+      if (!onlineMessageSent2) {
+        bot.sendMessage(CHAT_ID_2, "Fz Smart Light is online . You can send ARU_SIGNAL.", "");
+        onlineMessageSent2 = true;
+      }
+      if (text == "/ARU_SIGNAL") {
+        bot.sendMessage(chatId, "ARU_SIGNAL❤️ received babu!", "");
+        
+        // --- SOS Start (... --- ...) ---
+        // S (...): 3 short flashes
+        for (int j = 0; j < 3; j++) {  
+          setLightBrightness(255, "ARU_SIGNAL"); delay(200);  
+          setLightBrightness(0, "ARU_SIGNAL"); delay(200);    
+        }
+        delay(400); 
+
+        // O (---): 3 long flashes
+        for (int j = 0; j < 3; j++) {  
+          setLightBrightness(255, "ARU_SIGNAL"); delay(600);  
+          setLightBrightness(0, "ARU_SIGNAL"); delay(200);    
+        }
+        delay(400);
+
+        // S (...): 3 short flashes
+        for (int j = 0; j < 3; j++) {  
+          setLightBrightness(255, "ARU_SIGNAL"); delay(200);  
+          setLightBrightness(0, "ARU_SIGNAL"); delay(200);    
+        }
+        // --- SOS End ---
+        
+        delay(1000);  
+        setLightBrightness(0, "Off");  
+        
+      } else {
+        String keyboard = "[[\"/ARU_SIGNAL\"]]";
+        bot.sendMessageWithReplyKeyboard(chatId, "Choose an option:", "", keyboard, true);
+      }
+    } else {
+        Serial.println("Message from unauthorized chat ID: " + chatId);
+        // bot.sendMessage(chatId, "You are not authorized to use this bot.", ""); // Optional
+    }
+  }
+}
+
+void sendStatus() {
+  float temp = dht.readTemperature();
+  float hum = dht.readHumidity();
+  String msg;
+  if (!isnan(temp) && !isnan(hum)) {
+    msg = " **Status Update** \n";
+    msg += " Temp: " + String(temp, 1) + " °C\n";
+    msg += "Humidity: " + String(hum, 1) + " %\n";
+    msg += "Fan: " + fanMode + " (" + String(fanDuty) + ")\n";
+    msg += "RPM: " + String(rpm) + "\n";
+    msg += "Light: " + lightMode + " (" + String(lightLevel) + ")";
+    if (waveMode) msg += " 🌊";
+  } else {
+    msg = "❌ DHT22 sensor read error. Please check wiring.";
+    Serial.println("DHT22 read error.");
+  }
+  bot.sendMessage(CHAT_ID_1, msg, "Markdown");
+}
+
+void sendWebsiteData() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("sendWebsiteData: WiFi not connected.");
+    return;
+  }
+  float temp = dht.readTemperature();
+  float hum = dht.readHumidity();
+  if (isnan(temp) || isnan(hum)) {
+    Serial.println("sendWebsiteData: DHT read error, not sending data.");
+    return;
+  }
+
+  HTTPClient http;
+  http.begin(serverUrl);
+  http.addHeader("Content-Type", "application/json");
+
+  StaticJsonDocument<256> doc;  
+  doc["temperature"] = temp;
+  doc["humidity"] = hum;
+  // doc["fanMode"] = fanMode;
+  // doc["rpm"] = rpm;
+  // doc["lightMode"] = lightMode;
+  // doc["lightLevel"] = lightLevel;  
+
+  String payload;
+  serializeJson(doc, payload);
+
+  Serial.print("Sending data to website: ");
+  Serial.println(payload);
+  int httpResponseCode = http.POST(payload);
+
+  if (httpResponseCode > 0) {
+    Serial.print("HTTP Response code: ");
+    Serial.println(httpResponseCode);
+  } else {
+    Serial.print("Error sending POST: ");
+    Serial.println(httpResponseCode);
+  }
+  http.end();
+}
+
+void blinkLED(int times) {
+  for (int i = 0; i < times; i++) {
+    digitalWrite(LED_PIN, HIGH); delay(150);
+    digitalWrite(LED_PIN, LOW); delay(150);
+  }
+}
+
+void handleRoot() {
+  float temp = dht.readTemperature();
+  float hum = dht.readHumidity();
+  char page[3500];  
+
+  const char* html_template = R"=====(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv='refresh' content='10'/>
+    <title>ESP32 Dashboard</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; background-color: #f0f2f5; color: #1c1e21; display: flex; justify-content: center; align-items: flex-start; min-height: 100vh; padding-top: 20px; box-sizing: border-box;}
+        .container { background-color: #ffffff; padding: 25px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1), 0 8px 16px rgba(0,0,0,0.1); width: 90%%; max-width: 600px; }
+        h2 { color: #1877f2; text-align: center; margin-bottom: 20px; }
+        p { line-height: 1.6; margin: 8px 0; }
+        .section { margin-bottom: 25px; padding-bottom: 15px; border-bottom: 1px solid #dddfe2; }
+        .section:last-child { border-bottom: none; }
+        .section h3 { color: #333; margin-top: 0; margin-bottom: 12px; font-size: 1.1em; }
+        .button-group a, .button-group input[type='submit'], .controls input[type='submit'] {
+            background-color: #1877f2; color: white; padding: 10px 18px; text-decoration: none;
+            border-radius: 6px; margin-right: 8px; border: none; cursor: pointer; display: inline-block; font-size: 0.95em;
+            transition: background-color 0.2s ease; margin-top: 5px;
+        }
+        .button-group a:hover, .button-group input[type='submit']:hover, .controls input[type='submit']:hover { background-color: #166fe5; }
+        .control-group { margin-bottom: 18px; }
+        label { font-weight: 600; display: block; margin-bottom: 6px; }
+        input[type='range'] { width: 65%%; margin-right: 10px; vertical-align: middle; accent-color: #1877f2;}
+        output { font-weight: bold; vertical-align: middle; background-color: #e7f3ff; padding: 4px 8px; border-radius: 4px; color: #1877f2; min-width:25px; display:inline-block; text-align:center;}
+        .slider-container { display: flex; align-items: center; }
+        .slider-container input[type='submit'] { margin-left:10px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>ESP32 Smart Controller</h2>
+        
+        <div class="section">
+            <h3>📊 Environment</h3>
+            <p><strong>Temperature:</strong> %.1f &deg;C</p>
+            <p><strong>Humidity:</strong> %.1f %%</p>
+        </div>
+
+        <div class="section">
+            <h3>🌀 Fan Status</h3>
+            <p><strong>Mode:</strong> %s</p>
+            <p><strong>RPM:</strong> %d</p>
+        </div>
+
+        <div class="section">
+            <h3>💡 Light Status</h3>
+            <p><strong>Mode:</strong> %s</p>
+            <p><strong>Level:</strong> %d %s</p>
+        </div>
+
+        <div class="section controls">
+            <h3>Fan Control</h3>
+            <div class="control-group button-group">
+                <a href='/setfan?mode=slow'>Slow</a>
+                <a href='/setfan?mode=medium'>Medium</a>
+                <a href='/setfan?mode=fast'>Fast</a>
+            </div>
+        </div>
+
+        <div class="section controls">
+            <h3>Light Control</h3>
+            <div class="control-group button-group">
+                <a href='/setlight?mode=dim'>Dim (50)</a>
+                <a href='/setlight?mode=bright'>Bright (255)</a>
+                <a href='/setlight?mode=off'>Off (0)</a>
+            </div>
+            <div class="control-group">
+                <form action="/setlight" method="get" style="margin-top:10px;">
+                    <label for="brightness">Set Custom Brightness:</label>
+                    <div class="slider-container">
+                        <input type="range" id="brightness" name="value" min="0" max="255" value="%d" oninput="document.getElementById('brightnessValue').textContent = this.value;">
+                        <output id="brightnessValue">%d</output>
+                        <input type="submit" value="Set">
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+)=====";
+
+  snprintf(page, sizeof(page), html_template,
+    temp, hum,
+    fanMode.c_str(), rpm,
+    lightMode.c_str(), lightLevel, waveMode ? "(Wave Active)" : "",
+    lightLevel, lightLevel // For slider initial value and output
+  );
+  server.send(200, "text/html", page);
+}
+
+
+void handleSetFan() {
+  if (server.hasArg("mode")) {
+    String m = server.arg("mode");
+    if (m == "slow") setFanSpeed(85, "Slow");  
+    else if (m == "medium") setFanSpeed(170, "Medium");
+    else if (m == "fast") setFanSpeed(255, "Fast");
+    
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");  
+  } else {
+    server.send(400, "text/plain", "Bad Request: Missing 'mode' parameter.");
+  }
+}
+
+void handleSetLight() {
+  bool success = false;
+  if (server.hasArg("mode")) {
+    String m = server.arg("mode");
+    waveMode = false;  
+    if (m == "dim") { setLightBrightness(50, "Dim"); success = true; }
+    else if (m == "bright") { setLightBrightness(255, "Bright"); success = true; }
+    else if (m == "off") { setLightBrightness(0, "Off"); success = true; }
+  } else if (server.hasArg("value")) {  
+    String valStr = server.arg("value");
+    int value = valStr.toInt();
+    bool isValidNumber = true;
+    if (valStr.length() == 0) isValidNumber = false; // Handle empty string
+    for (size_t i = 0; i < valStr.length(); i++) {
+        if (!isDigit(valStr.charAt(i))) {
+            isValidNumber = false;
+            break;
+        }
+    }
+    if (isValidNumber && value >= 0 && value <= 255) {
+        setLightBrightness(value, "Manual");  
+        success = true;
+    }
+  }
+
+  if (success) {
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");  
+  } else {
+    server.send(400, "text/plain", "Bad Request: Missing or invalid 'mode' or 'value' parameter.");
+  }
+}

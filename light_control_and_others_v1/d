@@ -1,0 +1,336 @@
+#include <WiFi.h>
+#include <ESPAsyncWebServer.h>
+#include <IRremoteESP8266.h>
+#include <IRsend.h>
+#include <ir_Coolix.h>
+#include <ESPmDNS.h>
+#include <DHT.h>
+
+// Wi-Fi credentials
+const char* ssid = "Rush";
+const char* password = "01955593195";
+
+// IR setup
+const uint16_t kIrLedPin = 4;
+IRsend irsend(kIrLedPin);
+IRCoolixAC ac(kIrLedPin);
+
+// Sony IR Codes
+#define SONY_CODE_POWER         0xA90
+#define SONY_BITS_POWER         12
+#define SONY_CODE_VOL_UP        0x490
+#define SONY_BITS_VOL_UP        12
+#define SONY_CODE_VOL_DOWN      0xC90
+#define SONY_BITS_VOL_DOWN      12
+#define SONY_CODE_MUTE          0x290
+#define SONY_BITS_MUTE          12
+
+#define SONY_CODE_UP            0x2F0
+#define SONY_BITS_UP            12
+#define SONY_CODE_DOWN          0xAF0
+#define SONY_BITS_DOWN          12
+#define SONY_CODE_LEFT          0x2D0
+#define SONY_BITS_LEFT          12
+#define SONY_CODE_RIGHT         0xCD0
+#define SONY_BITS_RIGHT         12
+#define SONY_CODE_OK            0xA70
+#define SONY_BITS_OK            12
+
+#define SONY_CODE_HOME          0x70
+#define SONY_BITS_HOME          12
+#define SONY_CODE_OPTION        0x36E9
+#define SONY_BITS_OPTION        15
+#define SONY_CODE_RETURN        0x62E9
+#define SONY_BITS_RETURN        15
+
+#define SONY_CODE_INPUT_TOGGLE  0xA50
+#define SONY_BITS_INPUT_TOGGLE  12
+
+const int SONY_REPEATS = 2;
+
+// DHT22 and PWM light
+#define DHTPIN 13
+#define DHTTYPE DHT22
+#define LIGHT_PIN 33
+DHT dht(DHTPIN, DHTTYPE);
+int brightness = 0; // 0-255
+
+// Web server
+AsyncWebServer server(80);
+
+// HTML Page with TV, AC, Light, and Sensor controls including Sony TV buttons
+const char* htmlPage = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <title>khulna tv ac light</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 20px;
+      background: #f0f2f5;
+      margin: 0;
+      color: #333;
+    }
+    h2 {
+      margin-top: 30px;
+      color: #2c3e50;
+      font-size: 24px;
+    }
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+    }
+    .btn-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+      gap: 15px;
+      margin-bottom: 20px;
+    }
+    button {
+      padding: 12px;
+      font-size: 16px;
+      border: none;
+      border-radius: 8px;
+      background: #3498db;
+      color: white;
+      cursor: pointer;
+      transition: background 0.3s;
+    }
+    button:hover {
+      background: #2980b9;
+    }
+    .slider-container {
+      margin: 20px 0;
+      padding: 15px;
+      background: white;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    input[type="range"] {
+      width: 100%;
+      margin: 10px 0;
+    }
+    .dashboard {
+      background: white;
+      padding: 15px;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+      margin-bottom: 20px;
+    }
+    .dashboard p {
+      margin: 5px 0;
+      font-size: 16px;
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h2>Dashboard</h2>
+  <div class="dashboard">
+    <p>Brightness: <span id="brightnessVal">0</span></p>
+    <p>Temperature: <span id="tempVal">--</span> C</p>
+    <p>Humidity: <span id="humidityVal">--</span> %</p>
+  </div>
+
+  <h2>TV Controls</h2>
+  <div class="btn-grid">
+    <button onclick="sendCmd('TV_POWER')">Power</button>
+    <button onclick="sendCmd('TV_VOLUP')">Vol +</button>
+    <button onclick="sendCmd('TV_VOLDOWN')">Vol -</button>
+    <button onclick="sendCmd('TV_MUTE')">Mute</button>
+    <button onclick="sendCmd('TV_UP')">Up</button>
+    <button onclick="sendCmd('TV_DOWN')">Down</button>
+    <button onclick="sendCmd('TV_LEFT')">Left</button>
+    <button onclick="sendCmd('TV_RIGHT')">Right</button>
+    <button onclick="sendCmd('TV_OK')">OK</button>
+    <button onclick="sendCmd('TV_HOME')">Home</button>
+    <button onclick="sendCmd('TV_OPTION')">Option</button>
+    <button onclick="sendCmd('TV_RETURN')">Return</button>
+    <button onclick="sendCmd('TV_INPUT')">Input</button>
+    
+  </div>
+
+  <h2>AC Controls</h2>
+  <div class="btn-grid">
+    <button onclick="sendCmd('AC_ON')">AC ON</button>
+    <button onclick="sendCmd('AC_OFF')">AC OFF</button>
+    <button onclick="sendCmd('AC_MODE_COOL')">Cool</button>
+    <button onclick="sendCmd('AC_MODE_HEAT')">Heat</button>
+    <button onclick="sendCmd('AC_MODE_DRY')">Dry</button>
+    <button onclick="sendCmd('AC_FAN_LOW')">Fan Low</button>
+    <button onclick="sendCmd('AC_FAN_AUTO')">Fan Med</button>
+    <button onclick="sendCmd('AC_FAN_HIGH')">Fan High</button>
+  </div>
+  <div class="slider-container">
+    <label>AC Temperature: <span id="acTempVal">22</span>C</label>
+    <input type="range" min="16" max="30" value="22" id="acTempSlider" oninput="setACTemp(this.value)">
+  </div>
+
+  <h2>Light Control</h2>
+  <div class="btn-grid">
+    <button onclick="setBrightness(100)">ON</button>
+    <button onclick="setBrightness(0)">OFF</button>
+  </div>
+  <div class="slider-container">
+    <label>Light Brightness: <span id="lightVal">0</span></label>
+    <input type="range" min="0" max="255" value="0" id="lightSlider" oninput="setBrightness(this.value)">
+  </div>
+</div>
+
+<script>
+function sendCmd(cmd) {
+  fetch(`/cmd?do=${cmd}`)
+    .then(r => r.text())
+    .then(t => {
+      if (cmd === 'GET_STATUS') {
+        const lines = t.split('\n');
+        lines.forEach(line => {
+          if (line.startsWith('Brightness:')) 
+            document.getElementById('brightnessVal').textContent = line.split(': ')[1];
+          else if (line.startsWith('Temperature:')) 
+            document.getElementById('tempVal').textContent = line.split(': ')[1].split(' ')[0];
+          else if (line.startsWith('Humidity:')) 
+            document.getElementById('humidityVal').textContent = line.split(': ')[1].split(' ')[0];
+        });
+      }
+    });
+}
+
+function setBrightness(val) {
+  document.getElementById('lightVal').textContent = val;
+  document.getElementById('brightnessVal').textContent = val;
+  document.getElementById('lightSlider').value = val;
+  fetch(`/cmd?do=LIGHT_${val}`).then(r => r.text()).then(t => console.log(t));
+}
+
+function setACTemp(val) {
+  document.getElementById('acTempVal').textContent = val;
+  fetch(`/cmd?do=AC_TEMP_${val}`).then(r => r.text()).then(t => console.log(t));
+}
+
+// Periodic sensor data refresh (every 5 seconds)
+function updateSensorData() {
+  sendCmd('GET_STATUS');
+}
+setInterval(updateSensorData, 5000);
+
+// Initial sensor data fetch
+updateSensorData();
+</script>
+</body>
+</html>
+)rawliteral";
+
+// Helper: send Sony command with repeats
+void sendSonyCmd(uint16_t code, uint16_t bits) {
+  irsend.sendSony(code, bits, SONY_REPEATS);
+}
+
+// Helper: send Sony input toggle multiple times with delay
+void sendSonyInputToggleRepeated(int times) {
+  for (int i = 0; i < times; i++) {
+    irsend.sendSony(SONY_CODE_INPUT_TOGGLE, SONY_BITS_INPUT_TOGGLE, SONY_REPEATS);
+    delay(500);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  irsend.begin();
+  ac.begin();
+  dht.begin();
+
+  // Setup PWM for light control on channel 0
+  ledcAttachPin(LIGHT_PIN, 0);
+  ledcSetup(0, 5000, 8);
+  ledcWrite(0, brightness);
+
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nConnected! IP: " + WiFi.localIP().toString());
+
+  if (MDNS.begin("esp")) {
+    Serial.println("mDNS responder started at http://esp.local");
+  } else {
+    Serial.println("Error starting mDNS");
+  }
+
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send(200, "text/html", htmlPage);
+  });
+
+  server.on("/cmd", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (!request->hasParam("do")) {
+      request->send(400, "text/plain", "Missing command");
+      return;
+    }
+    String cmd = request->getParam("do")->value();
+    cmd.trim();
+
+    if (cmd == "TV_POWER") sendSonyCmd(SONY_CODE_POWER, SONY_BITS_POWER);
+    else if (cmd == "TV_VOLUP") sendSonyCmd(SONY_CODE_VOL_UP, SONY_BITS_VOL_UP);
+    else if (cmd == "TV_VOLDOWN") sendSonyCmd(SONY_CODE_VOL_DOWN, SONY_BITS_VOL_DOWN);
+    else if (cmd == "TV_MUTE") sendSonyCmd(SONY_CODE_MUTE, SONY_BITS_MUTE);
+
+    else if (cmd == "TV_UP") sendSonyCmd(SONY_CODE_UP, SONY_BITS_UP);
+    else if (cmd == "TV_DOWN") sendSonyCmd(SONY_CODE_DOWN, SONY_BITS_DOWN);
+    else if (cmd == "TV_LEFT") sendSonyCmd(SONY_CODE_LEFT, SONY_BITS_LEFT);
+    else if (cmd == "TV_RIGHT") sendSonyCmd(SONY_CODE_RIGHT, SONY_BITS_RIGHT);
+    else if (cmd == "TV_OK") sendSonyCmd(SONY_CODE_OK, SONY_BITS_OK);
+
+    else if (cmd == "TV_HOME") sendSonyCmd(SONY_CODE_HOME, SONY_BITS_HOME);
+    else if (cmd == "TV_OPTION") sendSonyCmd(SONY_CODE_OPTION, SONY_BITS_OPTION);
+    else if (cmd == "TV_RETURN") sendSonyCmd(SONY_CODE_RETURN, SONY_BITS_RETURN);
+
+    else if (cmd == "TV_INPUT") sendSonyCmd(SONY_CODE_INPUT_TOGGLE, SONY_BITS_INPUT_TOGGLE);
+    else if (cmd == "TV_HDMI1") sendSonyInputToggleRepeated(2);
+    else if (cmd == "TV_HDMI2") sendSonyInputToggleRepeated(3);
+    else if (cmd == "TV_SCREENSHARE") sendSonyInputToggleRepeated(4);
+
+    else if (cmd == "AC_ON") ac.on();
+    else if (cmd == "AC_OFF") ac.off();
+    else if (cmd == "AC_MODE_COOL") ac.setMode(kCoolixCool);
+    else if (cmd == "AC_MODE_HEAT") ac.setMode(kCoolixHeat);
+    else if (cmd == "AC_MODE_DRY") ac.setMode(kCoolixDry);
+    else if (cmd == "AC_TEMP_22") ac.setTemp(22);
+    else if (cmd == "AC_TEMP_25") ac.setTemp(25);
+    else if (cmd == "AC_TEMP_28") ac.setTemp(28);
+    else if (cmd == "AC_FAN_LOW") ac.setFan(kCoolixFanMin);
+    else if (cmd == "AC_FAN_MED") ac.setFan(kCoolixFanMed);
+    else if (cmd == "AC_FAN_HIGH") ac.setFan(kCoolixFanMax);
+
+    else if (cmd.startsWith("LIGHT_")) {
+      int val = cmd.substring(6).toInt();
+      val = constrain(val, 0, 255);
+      brightness = val;
+      ledcWrite(0, brightness);
+    }
+
+    else if (cmd == "GET_STATUS") {
+      float t = dht.readTemperature();
+      float h = dht.readHumidity();
+      String resp = "Brightness: " + String(brightness);
+      if (!isnan(t)) resp += "\nTemperature: " + String(t) + " °C";
+      if (!isnan(h)) resp += "\nHumidity: " + String(h) + " %";
+      request->send(200, "text/plain", resp);
+      return;
+    }
+
+    // For AC commands, send the IR signal
+    if (cmd.startsWith("AC_")) ac.send();
+
+    request->send(200, "text/plain", "Sent: " + cmd);
+  });
+
+  server.begin();
+}
+
+void loop() {
+  // No background processing needed
+}

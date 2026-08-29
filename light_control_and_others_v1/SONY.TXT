@@ -1,0 +1,144 @@
+#include <Arduino.h>
+#include <IRremoteESP8266.h>
+#include <IRsend.h>
+
+// Define IR LED output pin
+const uint16_t kIrLedPin = 4; // GPIO4
+IRsend irsend(kIrLedPin);
+
+// --- Sony IR Codes (Replace with your captured ones if needed) ---
+#define SONY_CODE_POWER         0xA90
+#define SONY_BITS_POWER         12
+
+#define SONY_CODE_VOL_UP        0x490
+#define SONY_BITS_VOL_UP        12
+#define SONY_CODE_VOL_DOWN      0xC90
+#define SONY_BITS_VOL_DOWN      12
+#define SONY_CODE_MUTE          0x290
+#define SONY_BITS_MUTE          12
+
+#define SONY_CODE_UP            0x52B
+#define SONY_BITS_UP            20
+#define SONY_CODE_DOWN          0xD2B
+#define SONY_BITS_DOWN          20
+#define SONY_CODE_LEFT          0x92B
+#define SONY_BITS_LEFT          20
+#define SONY_CODE_RIGHT         0x12B
+#define SONY_BITS_RIGHT         20
+#define SONY_CODE_OK            0xA4B
+#define SONY_BITS_OK            20
+
+#define SONY_CODE_HOME          0x40B
+#define SONY_BITS_HOME          20
+#define SONY_CODE_OPTION        0x84B
+#define SONY_BITS_OPTION        20
+#define SONY_CODE_RETURN        0xB0B
+#define SONY_BITS_RETURN        20
+
+// Input toggle button (0xA50) opens the input menu and steps through options
+#define SONY_CODE_INPUT_TOGGLE  0xA50
+#define SONY_BITS_INPUT_TOGGLE  12
+
+// Number of IR signal repeats for Sony (usually 2–3)
+const int SONY_REPEATS = 2;
+
+// Show available commands
+void printAvailableCommands() {
+  Serial.println("\nAvailable commands (case sensitive):");
+  Serial.println("  POWER, VOLUP, VOLDOWN, MUTE");
+  Serial.println("  UP, DOWN, LEFT, RIGHT, OK");
+  Serial.println("  HOME, OPTION, RETURN");
+  Serial.println("  INPUT, HDMI1, HDMI2, SCREENSHARE");
+  Serial.println("Enter command and press Send/Enter:");
+}
+
+// Send a Sony command multiple times with a delay
+void sendSonyMulti(uint16_t code, uint16_t bits, int repeatCount, int delayBetween) {
+  for (int i = 0; i < repeatCount; i++) {
+    irsend.sendSony(code, bits, SONY_REPEATS);
+    delay(delayBetween);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial) delay(10);
+
+  irsend.begin();
+  Serial.println("IR Transmitter Ready for Serial Control.");
+  Serial.print("IR LED on GPIO");
+  Serial.println(kIrLedPin);
+  Serial.println("IMPORTANT: Replace placeholder IR codes with your captured values if needed.");
+  printAvailableCommands();
+}
+
+void loop() {
+  if (Serial.available() > 0) {
+    String command = Serial.readStringUntil('\n');
+    command.trim();
+
+    Serial.print("Received command: '");
+    Serial.print(command);
+    Serial.println("'");
+
+    bool commandRecognized = true;
+
+    if (command.equals("POWER")) {
+      Serial.println("Sending POWER...");
+      irsend.sendSony(SONY_CODE_POWER, SONY_BITS_POWER, SONY_REPEATS);
+    } else if (command.equals("VOLUP")) {
+      Serial.println("Sending VOLUME UP...");
+      irsend.sendSony(SONY_CODE_VOL_UP, SONY_BITS_VOL_UP, SONY_REPEATS);
+    } else if (command.equals("VOLDOWN")) {
+      Serial.println("Sending VOLUME DOWN...");
+      irsend.sendSony(SONY_CODE_VOL_DOWN, SONY_BITS_VOL_DOWN, SONY_REPEATS);
+    } else if (command.equals("MUTE")) {
+      Serial.println("Sending MUTE...");
+      irsend.sendSony(SONY_CODE_MUTE, SONY_BITS_MUTE, SONY_REPEATS);
+    } else if (command.equals("UP")) {
+      Serial.println("Sending UP...");
+      irsend.sendSony(SONY_CODE_UP, SONY_BITS_UP, SONY_REPEATS);
+    } else if (command.equals("DOWN")) {
+      Serial.println("Sending DOWN...");
+      irsend.sendSony(SONY_CODE_DOWN, SONY_BITS_DOWN, SONY_REPEATS);
+    } else if (command.equals("LEFT")) {
+      Serial.println("Sending LEFT...");
+      irsend.sendSony(SONY_CODE_LEFT, SONY_BITS_LEFT, SONY_REPEATS);
+    } else if (command.equals("RIGHT")) {
+      Serial.println("Sending RIGHT...");
+      irsend.sendSony(SONY_CODE_RIGHT, SONY_BITS_RIGHT, SONY_REPEATS);
+    } else if (command.equals("OK")) {
+      Serial.println("Sending OK/SELECT...");
+      irsend.sendSony(SONY_CODE_OK, SONY_BITS_OK, SONY_REPEATS);
+    } else if (command.equals("HOME")) {
+      Serial.println("Sending HOME...");
+      irsend.sendSony(SONY_CODE_HOME, SONY_BITS_HOME, SONY_REPEATS);
+    } else if (command.equals("OPTION")) {
+      Serial.println("Sending OPTION...");
+      irsend.sendSony(SONY_CODE_OPTION, SONY_BITS_OPTION, SONY_REPEATS);
+    } else if (command.equals("RETURN")) {
+      Serial.println("Sending RETURN/BACK...");
+      irsend.sendSony(SONY_CODE_RETURN, SONY_BITS_RETURN, SONY_REPEATS);
+    } else if (command.equals("INPUT")) {
+      Serial.println("Sending INPUT TOGGLE (Menu open only)...");
+      sendSonyMulti(SONY_CODE_INPUT_TOGGLE, SONY_BITS_INPUT_TOGGLE, 1, 500);
+    } else if (command.equals("HDMI1")) {
+      Serial.println("Sending HDMI1 (Menu + 1 press)...");
+      sendSonyMulti(SONY_CODE_INPUT_TOGGLE, SONY_BITS_INPUT_TOGGLE, 2, 500);
+    } else if (command.equals("HDMI2")) {
+      Serial.println("Sending HDMI2 (Menu + 2 presses)...");
+      sendSonyMulti(SONY_CODE_INPUT_TOGGLE, SONY_BITS_INPUT_TOGGLE, 3, 500);
+    } else if (command.equals("SCREENSHARE")) {
+      Serial.println("Sending SCREENSHARE (Menu + 3 presses)...");
+      sendSonyMulti(SONY_CODE_INPUT_TOGGLE, SONY_BITS_INPUT_TOGGLE, 4, 500);
+    } else {
+      Serial.println("Unknown command.");
+      commandRecognized = false;
+    }
+
+    if (commandRecognized) {
+      Serial.println("Command sent.");
+    }
+    printAvailableCommands();
+  }
+}

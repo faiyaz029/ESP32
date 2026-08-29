@@ -1,0 +1,126 @@
+#include <WiFi.h>
+#include <ESPAsyncWebServer.h>
+#include <IRremoteESP8266.h>
+#include <IRsend.h>
+#include <ir_Coolix.h>
+#include <ESPmDNS.h>
+
+// Wi-Fi credentials
+const char* ssid = "Rush";
+const char* password = "01955593195";
+
+// IR setup
+const uint16_t kIrLedPin = 4;
+IRsend irsend(kIrLedPin);
+IRCoolixAC ac(kIrLedPin);
+
+// Sony IR Codes
+#define SONY_CODE_POWER         0xA90
+#define SONY_BITS_POWER         12
+#define SONY_CODE_VOL_UP        0x490
+#define SONY_BITS_VOL_UP        12
+#define SONY_CODE_VOL_DOWN      0xC90
+#define SONY_BITS_VOL_DOWN      12
+#define SONY_CODE_MUTE          0x290
+#define SONY_BITS_MUTE          12
+const int SONY_REPEATS = 2;
+
+// Web server
+AsyncWebServer server(80);
+
+// HTML Page
+const char* htmlPage = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head><title>ESP32 IR Control</title></head>
+<body>
+<h2>TV Controls</h2>
+<button onclick="sendCmd('TV_POWER')">Power</button>
+<button onclick="sendCmd('TV_VOLUP')">Vol +</button>
+<button onclick="sendCmd('TV_VOLDOWN')">Vol -</button>
+<button onclick="sendCmd('TV_MUTE')">Mute</button>
+
+<h2>AC Controls</h2>
+<button onclick="sendCmd('AC_ON')">AC ON</button>
+<button onclick="sendCmd('AC_OFF')">AC OFF</button>
+<button onclick="sendCmd('AC_MODE_COOL')">Cool</button>
+<button onclick="sendCmd('AC_MODE_HEAT')">Heat</button>
+<button onclick="sendCmd('AC_MODE_DRY')">Dry</button>
+<button onclick="sendCmd('AC_TEMP_22')">Temp 22</button>
+<button onclick="sendCmd('AC_TEMP_25')">Temp 25</button>
+<button onclick="sendCmd('AC_TEMP_28')">Temp 28</button>
+<button onclick="sendCmd('AC_FAN_LOW')">Fan Low</button>
+<button onclick="sendCmd('AC_FAN_MED')">Fan Med</button>
+<button onclick="sendCmd('AC_FAN_HIGH')">Fan High</button>
+
+<script>
+function sendCmd(cmd) {
+  fetch(`/cmd?do=${cmd}`).then(r => r.text()).then(t => alert(t));
+}
+</script>
+</body>
+</html>
+)rawliteral";
+
+void sendSonyCmd(uint16_t code, uint16_t bits) {
+  irsend.sendSony(code, bits, SONY_REPEATS);
+}
+
+void setup() {
+  Serial.begin(115200);
+  irsend.begin();
+  ac.begin();
+
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nConnected! IP: " + WiFi.localIP().toString());
+
+  if (MDNS.begin("esp")) {
+    Serial.println("mDNS responder started at http://esp.local");
+  } else {
+    Serial.println("Error starting mDNS");
+  }
+
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send(200, "text/html", htmlPage);
+  });
+
+  server.on("/cmd", HTTP_GET, [](AsyncWebServerRequest *request){
+    if (!request->hasParam("do")) {
+      request->send(400, "text/plain", "Missing command");
+      return;
+    }
+    String cmd = request->getParam("do")->value();
+
+    if (cmd == "TV_POWER") sendSonyCmd(SONY_CODE_POWER, SONY_BITS_POWER);
+    else if (cmd == "TV_VOLUP") sendSonyCmd(SONY_CODE_VOL_UP, SONY_BITS_VOL_UP);
+    else if (cmd == "TV_VOLDOWN") sendSonyCmd(SONY_CODE_VOL_DOWN, SONY_BITS_VOL_DOWN);
+    else if (cmd == "TV_MUTE") sendSonyCmd(SONY_CODE_MUTE, SONY_BITS_MUTE);
+
+    else if (cmd == "AC_ON") ac.on();
+    else if (cmd == "AC_OFF") ac.off();
+    else if (cmd == "AC_MODE_COOL") ac.setMode(kCoolixCool);
+    else if (cmd == "AC_MODE_HEAT") ac.setMode(kCoolixHeat);
+    else if (cmd == "AC_MODE_DRY") ac.setMode(kCoolixDry);
+    else if (cmd == "AC_TEMP_22") ac.setTemp(22);
+    else if (cmd == "AC_TEMP_25") ac.setTemp(25);
+    else if (cmd == "AC_TEMP_28") ac.setTemp(28);
+    else if (cmd == "AC_FAN_LOW") ac.setFan(kCoolixFanMin);
+    else if (cmd == "AC_FAN_MED") ac.setFan(kCoolixFanMed);
+    else if (cmd == "AC_FAN_HIGH") ac.setFan(kCoolixFanMax);
+
+    if (cmd.startsWith("AC_")) ac.send();
+
+    request->send(200, "text/plain", "Sent: " + cmd);
+  });
+
+  server.begin();
+}
+
+void loop() {
+  // Nothing needed here
+}
