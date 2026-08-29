@@ -1,0 +1,47 @@
+#include <BluetoothSerial.h>
+#include <DHT.h>
+
+// ------------ DHT Setup ------------
+#define DHTPIN 15
+#define DHTTYPE DHT22
+DHT dht(DHTPIN, DHTTYPE);
+
+// ------------ Bluetooth Setup ------------
+BluetoothSerial SerialBT;
+
+// ------------ Timing Setup ------------
+unsigned long lastBTTime = 0;
+const unsigned long btInterval = 5000; // 5 seconds
+
+void setup() {
+  Serial.begin(115200);
+  dht.begin();
+  
+  // Start Bluetooth
+  SerialBT.begin("fzESP");
+  Serial.println("Bluetooth started. Waiting for connection...");
+}
+
+void loop() {
+  unsigned long currentTime = millis();
+
+  if (currentTime - lastBTTime > btInterval) {
+    float temp = dht.readTemperature();
+    float hum = dht.readHumidity();
+
+    if (!isnan(temp) && !isnan(hum)) {
+      
+      String message = "T: " + String((int)round(temp)) + "  H: " + String((int)round(hum));
+      String message1 = "T: " + String((temp)) + "  H: " + String((hum));
+
+
+      SerialBT.println(message);
+      Serial.println("[Bluetooth] " + message1);
+    } else {
+      SerialBT.println("DHT Read Error");
+      Serial.println("[Bluetooth] DHT Read Error");
+    }
+
+    lastBTTime = currentTime;
+  }
+}

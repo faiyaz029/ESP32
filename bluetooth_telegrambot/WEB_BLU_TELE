@@ -1,0 +1,169 @@
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <UniversalTelegramBot.h>
+#include <BluetoothSerial.h>
+#include "DHT.h"
+
+// --- DHT Sensor Setup ---
+#define DHTPIN 15
+#define DHTTYPE DHT22
+DHT dht(DHTPIN, DHTTYPE);
+
+// --- Wi-Fi Credentials ---
+const char* ssid = "twogsimp";
+const char* password = "ami2G#sImPeR";
+
+// --- Telegram Setup ---
+#define botToken "8050439108:AAEXlV9xp2qI5HW-oisJUHrsrE5Rv2MvBv0"
+#define chatID "1360445792"
+WiFiClientSecure client;
+UniversalTelegramBot bot(botToken, client);
+
+// --- Website Endpoint ---
+const char* serverUrl = "https://v0-esp32-weather-dashboard.vercel.app/api/readings";
+
+// --- Bluetooth Setup ---
+BluetoothSerial SerialBT;
+
+// --- Timing ---
+unsigned long lastBTTime = 0;
+const unsigned long btInterval = 10000; // 10 seconds
+
+unsigned long lastSendTime = 0;
+const unsigned long sendInterval = 20 * 60 * 1000UL; // 20 minutes
+
+bool wifiActive = false;
+
+void setup() {
+  Serial.begin(115200);
+  dht.begin();
+  SerialBT.begin("fzESP");
+  Serial.println("Bluetooth started.");
+}
+
+void loop() {
+  unsigned long currentTime = millis();
+
+  if (currentTime - lastBTTime >= btInterval) {
+    sendBluetoothData();
+    lastBTTime = currentTime;
+  }
+
+  if (currentTime - lastSendTime >= sendInterval) {
+    lastSendTime = currentTime;
+
+    stopBluetooth();
+    startWiFi();
+
+    if (WiFi.status() == WL_CONNECTED) {
+      sendTelegramData();
+      sendWebsiteData();
+    }
+
+    stopWiFi();
+    startBluetooth();
+  }
+}
+
+void sendBluetoothData() {
+  float temp = dht.readTemperature();
+  float hum = dht.readHumidity();
+
+  if (!isnan(temp) && !isnan(hum)) {
+    String message = "T: " + String(temp, 1) + ", H: " + String(hum, 1);
+    SerialBT.println(message);
+    Serial.println("[Bluetooth] " + message);
+  } else {
+    SerialBT.println("DHT Read Error");
+    Serial.println("[Bluetooth] DHT Read Error");
+  }
+}
+
+void sendTelegramData() {
+  float temp = dht.readTemperature();
+  float hum = dht.readHumidity();
+
+  String message;
+  if (!isnan(temp) && !isnan(hum)) {
+    message = "T: " + String(temp, 1) + ", H: " + String(hum, 1);
+  } else {
+    message = "Failed to read from DHT22 sensor.";
+  }
+
+  bot.sendMessage(chatID, message, "");
+  Serial.println("[Telegram] " + message);
+}
+
+void sendWebsiteData() {
+  float temp = dht.readTemperature();
+  float hum = dht.readHumidity();
+
+  if (isnan(temp) || isnan(hum)) {
+    Serial.println("[Website] DHT Read Error");
+    return;
+  }
+
+  HTTPClient http;
+  http.begin(serverUrl);
+  http.addHeader("Content-Type", "application/json");
+
+  StaticJsonDocument<200> doc;
+  doc["temperature"] = temp;
+  doc["humidity"] = hum;
+
+  String payload;
+  serializeJson(doc, payload);
+  Serial.println("[Website] Sending: " + payload);
+
+  int code = http.POST(payload);
+  if (code > 0) {
+    Serial.println("[Website] Response code: " + String(code));
+    Serial.println("[Website] Response: " + http.getString());
+  } else {
+    Serial.println("[Website] POST failed: " + String(code));
+  }
+
+  http.end();
+}
+
+void startWiFi() {
+  Serial.println("Starting WiFi...");
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  client.setCACert(TELEGRAM_CERTIFICATE_ROOT);
+
+  unsigned long startTime = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - startTime < 10000) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi connected. IP: " + WiFi.localIP().toString());
+    wifiActive = true;
+  } else {
+    Serial.println("\nWiFi connection failed.");
+    wifiActive = false;
+  }
+}
+
+void stopWiFi() {
+  Serial.println("Stopping WiFi...");
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_OFF);
+  wifiActive = false;
+}
+
+void startBluetooth() {
+  if (!SerialBT.hasClient()) {
+    SerialBT.begin("ESP32_BT");
+    Serial.println("Bluetooth started.");
+  }
+}
+
+void stopBluetooth() {
+  Serial.println("Stopping Bluetooth...");
+  SerialBT.end();
+}

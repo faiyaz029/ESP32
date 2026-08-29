@@ -1,0 +1,93 @@
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include "DHT.h"
+#include "esp_sleep.h"
+
+// DHT22 sensor setup
+#define DHTPIN 15        // GPIO15
+#define DHTTYPE DHT22
+DHT dht(DHTPIN, DHTTYPE);
+
+// WiFi credentials
+const char* ssid = "twogsimp";
+const char* password = "ami2G#sImPeR";
+
+// Google Apps Script info
+const char* host = "script.google.com";
+const int httpsPort = 443;
+String GAS_ID = "AKfycbwvypBRYtgdPi0A13n3Y36Anan9Q8Wep8Xn9-XVssX5HatDNYFt-um_WjBKQE2fsMy7";  // Your Web App ID
+
+WiFiClientSecure client;
+
+// Deep sleep time: 5 minutes (in microseconds)
+#define uS_TO_S_FACTOR 1000000ULL
+#define TIME_TO_SLEEP 300  // 300 seconds = 5 minutes
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  dht.begin();
+
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(250);
+  }
+  Serial.println("\nConnected to WiFi");
+  Serial.println("IP address: " + WiFi.localIP().toString());
+
+  client.setInsecure();  // Accept all certificates
+
+  float h = dht.readHumidity();
+  float t = dht.readTemperature();
+
+  if (isnan(h) || isnan(t)) {
+    Serial.println("Failed to read from DHT22 sensor!");
+  } else {
+    Serial.println("Temperature: " + String(t) + " °C");
+    Serial.println("Humidity: " + String(h) + " %");
+    sendData(t, h);
+  }
+
+  Serial.println("Going to sleep for " + String(TIME_TO_SLEEP) + " seconds...");
+  esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
+  esp_deep_sleep_start();
+}
+
+void loop() {
+  // Nothing here — runs once then sleeps
+}
+
+void sendData(float temperature, float humidity) {
+  if (!client.connect(host, httpsPort)) {
+    Serial.println("Connection to host failed");
+    return;
+  }
+
+  String url = "/macros/s/" + GAS_ID + "/exec?temperature=" + String(temperature) + "&humidity=" + String(humidity);
+  Serial.print("Requesting URL: ");
+  Serial.println(url);
+
+  client.print(String("GET ") + url + " HTTP/1.1\r\n" +
+               "Host: " + host + "\r\n" +
+               "User-Agent: ESP32Client\r\n" +
+               "Connection: close\r\n\r\n");
+
+  while (client.connected()) {
+    String line = client.readStringUntil('\n');
+    if (line == "\r") {
+      break;
+    }
+  }
+
+  String line = client.readStringUntil('\n');
+  if (line.startsWith("{\"state\":\"success\"")) {
+    Serial.println("Data sent successfully!");
+  } else {
+    Serial.println("Failed to send data");
+  }
+
+  Serial.println("Closing connection");
+}

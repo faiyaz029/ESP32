@@ -1,0 +1,130 @@
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <UniversalTelegramBot.h>
+#include <ArduinoJson.h>
+#include "DHT.h"
+
+// ------------ Sensor Setup ------------
+#define DHTPIN 15
+#define DHTTYPE DHT22
+DHT dht(DHTPIN, DHTTYPE);
+
+// ------------ Wi-Fi Credentials ------------
+const char* ssid = "twogsimp";
+const char* password = "ami2G#sImPeR";
+
+// ------------ Telegram Bot Info ------------
+#define botToken "8050439108:AAEXlV9xp2qI5HW-oisJUHrsrE5Rv2MvBv0"
+#define chatID "1360445792"
+
+// ------------ Telegram Setup ------------
+WiFiClientSecure client;
+UniversalTelegramBot bot(botToken, client);
+
+// ------------ Timing Settings ------------
+unsigned long lastTelegramTime = 0;
+const unsigned long telegramInterval = 60000;  // Send auto every 60 seconds
+
+unsigned long lastPollTime = 0;
+const unsigned long pollInterval = 4000;       // Poll for user commands every 4 seconds
+
+void setup() {
+  Serial.begin(115200);
+  dht.begin();
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  client.setCACert(TELEGRAM_CERTIFICATE_ROOT);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.println("Connecting to Wi-Fi…");
+  }
+
+  Serial.println("WiFi connected.");
+  Serial.println(WiFi.localIP());
+}
+
+void loop() {
+  unsigned long currentTime = millis();
+
+  // Poll for Telegram commands every 4 seconds
+  if (currentTime - lastPollTime > pollInterval) {
+    int numNewMessages = bot.getUpdates(bot.last_message_received + 1);
+    while (numNewMessages) {
+      Serial.println("Received message");
+      handleNewMessages(numNewMessages);
+      numNewMessages = bot.getUpdates(bot.last_message_received + 1);
+    }
+    lastPollTime = currentTime;
+  }
+
+  // Send temperature and humidity every 60 seconds automatically
+  if (currentTime - lastTelegramTime > telegramInterval) {
+    sendSensorData();
+    lastTelegramTime = currentTime;
+  }
+}
+
+void handleNewMessages(int numNewMessages) {
+  for (int i = 0; i < numNewMessages; i++) {
+    String chat_id = String(bot.messages[i].chat_id);
+
+    if (chat_id != chatID) {
+      bot.sendMessage(chat_id, "Unauthorized user", "");
+      continue;
+    }
+
+    String text = bot.messages[i].text;
+    String fromName = bot.messages[i].from_name;
+    String message;
+
+    if (text == "/start") {
+      message = "Hello, " + fromName + ".\n";
+      message += "Send /temp for temperature\n";
+      message += "Send /hum for humidity\n";
+      bot.sendMessage(chat_id, message, "");
+    }
+
+    if (text == "/temp") {
+      float temp = dht.readTemperature();
+      message = isnan(temp) ? "Failed to read temperature." : "Temperature (°C): " + String(temp, 1);
+      bot.sendMessage(chat_id, message, "");
+    }
+
+    if (text == "/hum") {
+      float hum = dht.readHumidity();
+      message = isnan(hum) ? "Failed to read humidity." : "Humidity (%): " + String(hum, 1);
+      bot.sendMessage(chat_id, message, "");
+    }
+  }
+}
+
+void sendSensorData() {
+  float temp = dht.readTemperature();
+  float hum = dht.readHumidity();
+  String message;
+
+  if (isnan(temp) || isnan(hum)) {
+    message = "Failed to read from DHT22 sensor.";
+  } else {
+    message = "Automatic Update:\n";
+    message += "Temperature (°C): " + String(temp, 1) + "\n";
+    message += "Humidity (%): " + String(hum, 1);
+  }
+
+  bot.sendMessage(chatID, message, "");
+  Serial.println("Auto Telegram update sent.");
+}
+
+
+
+
+
+
+
+
+
+
+
+

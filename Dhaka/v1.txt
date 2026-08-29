@@ -1,0 +1,267 @@
+// ESP32 RGB + Light Control with Effects and WiFi/Bluetooth Switching
+// VERSION 2: Improved mode switching and startup signals.
+
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Preferences.h>
+#include <WiFiClientSecure.h>
+#include <UniversalTelegramBot.h>
+#include <ESPmDNS.h>
+#include "BluetoothSerial.h"
+
+// --- Global Variables ---
+BluetoothSerial SerialBT;
+
+enum DeviceMode { MODE_WIFI, MODE_BLUETOOTH };
+DeviceMode currentMode; // Will be set in setup()
+
+Preferences prefs;
+WebServer server(80);
+
+// WiFi and Telegram settings
+const char* ssid = "fzpc";
+const char* password = "29402011";
+WiFiClientSecure client;
+#define BOT_TOKEN "8050439108:AAEXlV9xp2qI5HW-oisJUHrsrE5Rv2MvBv0"
+#define CHAT_ID_1 "1360445792"
+#define CHAT_ID_2 "5085045218"
+UniversalTelegramBot bot(BOT_TOKEN, client);
+bool onlineMessageSent2 = false;
+
+// Pin and State variables
+#define RED_PIN    32
+#define GREEN_PIN  33
+#define BLUE_PIN   13
+#define LIGHT1_PIN 23
+#define LIGHT2_PIN 22
+#define BUZZER     4
+
+int red = 0, green = 0, blue = 0;
+int light1 = 0, light2 = 0;
+unsigned long lastChange = 0;
+bool pendingSave = false;
+
+// Effect state
+enum ActiveEffect { NONE, RAINBOW, BREATHE, RAINBOW_BREATHE, FLAME_BREATHE };
+ActiveEffect currentEffect = NONE;
+
+// State machine variables for effects
+int rainbowState = 0, rainbowValue = 0;
+unsigned long lastRainbowUpdate = 0;
+const int RAINBOW_STEP_DELAY = 147;
+int flameR = 0, flameG = 0, flameB = 0;
+bool flameForward = true;
+unsigned long lastFlameUpdate = 0;
+const int FLAME_STEP_DELAY = 50;
+
+
+// --- Core & Utility Functions ---
+void applyPWM() { ledcWrite(0, red); ledcWrite(1, green); ledcWrite(2, blue); ledcWrite(3, light1); ledcWrite(4, light2); }
+void stopEffect() { currentEffect = NONE; applyPWM(); }
+void saveToFlash() { prefs.begin("rgbstore", false); prefs.putUChar("red", red); prefs.putUChar("green", green); prefs.putUChar("blue", blue); prefs.putUChar("light1", light1); prefs.putUChar("light2", light2); prefs.end(); Serial.println("Settings saved to flash."); }
+void loadFromFlash() { prefs.begin("rgbstore", true); red = prefs.getUChar("red", 0); green = prefs.getUChar("green", 0); blue = prefs.getUChar("blue", 0); light1 = prefs.getUChar("light1", 0); light2 = prefs.getUChar("light2", 0); prefs.end(); Serial.println("Settings loaded from flash."); }
+void setupPWM() { for (int i = 0; i < 5; i++) { ledcSetup(i, 5000, 8); } ledcAttachPin(RED_PIN, 0); ledcAttachPin(GREEN_PIN, 1); ledcAttachPin(BLUE_PIN, 2); ledcAttachPin(LIGHT1_PIN, 3); ledcAttachPin(LIGHT2_PIN, 4); }
+
+// NEW: Function to turn all lights off before a restart
+void allLightsOffAndSave() {
+  red = 0; green = 0; blue = 0; light1 = 0; light2 = 0;
+  applyPWM();
+  saveToFlash();
+}
+
+// NEW: Function to signal the current mode on startup
+void signalMode(DeviceMode mode) {
+  int r = 0, g = 0, b = 0;
+  if (mode == MODE_WIFI) { g = 255; } // Blue for WiFi
+  else { b = 255; } // Green for Bluetooth
+
+  for (int i=0; i<2; i++) {
+    ledcWrite(0, r); ledcWrite(1, g); ledcWrite(2, b);
+    digitalWrite(BUZZER, HIGH);
+    delay(150);
+    ledcWrite(0, 0); ledcWrite(1, 0); ledcWrite(2, 0);
+    digitalWrite(BUZZER, LOW);
+    delay(150);
+  }
+}
+
+// --- RGB Effect Handlers (remain the same) ---
+void handleRainbow() { if (millis() - lastRainbowUpdate > RAINBOW_STEP_DELAY) { lastRainbowUpdate = millis(); int r, g, b; switch (rainbowState) { case 0: r = 255; g = rainbowValue; b = 0; rainbowValue += 5; if (rainbowValue > 255) { rainbowValue = 255; rainbowState = 1; } break; case 1: r = rainbowValue; g = 255; b = 0; rainbowValue -= 5; if (rainbowValue < 0) { rainbowValue = 0; rainbowState = 2; } break; case 2: r = 0; g = 255; b = rainbowValue; rainbowValue += 5; if (rainbowValue > 255) { rainbowValue = 255; rainbowState = 3; } break; case 3: r = 0; g = rainbowValue; b = 255; rainbowValue -= 5; if (rainbowValue < 0) { rainbowValue = 0; rainbowState = 4; } break; case 4: r = rainbowValue; g = 0; b = 255; rainbowValue += 5; if (rainbowValue > 255) { rainbowValue = 255; rainbowState = 5; } break; case 5: r = 255; g = 0; b = rainbowValue; rainbowValue -= 5; if (rainbowValue < 0) { rainbowValue = 0; rainbowState = 0; } break; } ledcWrite(0, r); ledcWrite(1, g); ledcWrite(2, b); } }
+void handleBreathe() { float brightness = (sin(millis() / 3000.0 * PI) + 1.0) / 2.0; ledcWrite(0, red * brightness); ledcWrite(1, green * brightness); ledcWrite(2, blue * brightness); }
+void hsvToRgb(float h, float s, float v, int& r, int& g, int& b) { int i = floor(h * 6); float f = h * 6 - i; float p = v * (1 - s); float q = v * (1 - f * s); float t = v * (1 - (1 - f) * s); switch (i % 6) { case 0: r = v, g = t, b = p; break; case 1: r = q, g = v, b = p; break; case 2: r = p, g = v, b = t; break; case 3: r = p, g = q, b = v; break; case 4: r = t, g = p, b = v; break; case 5: r = v, g = p, b = q; break; } r *= 255; g *= 255; b *= 255; }
+void handleRainbowBreathe() { float hue = (millis() % 8000) / 8000.0; float brightness = (sin(millis() / 2500.0 * PI) + 1.0) / 2.0; int r, g, b; hsvToRgb(hue, 1.0, brightness, r, g, b); ledcWrite(0, r); ledcWrite(1, g); ledcWrite(2, b); }
+void handleFlameBreathe() { if (millis() - lastFlameUpdate > FLAME_STEP_DELAY) { lastFlameUpdate = millis(); if (flameForward) { if (flameR + 8 < 256) { flameR += 8; flameG += 1; } else { flameR = 255; flameG = 32; flameB = 0; flameForward = false; } } else { if (flameR - 8 > 0) { flameR -= 8; flameG -= 1; } else { flameR = 0; flameG = 0; flameB = 0; flameForward = true; } } ledcWrite(0, flameR); ledcWrite(1, flameG); ledcWrite(2, flameB); } }
+
+// --- Web Server and Telegram Handlers ---
+// NEW: Handler to switch back to Bluetooth mode
+void handleSwitchToBT() {
+  server.send(200, "text/plain", "OK. Restarting in Bluetooth mode...");
+  delay(1000);
+  
+  prefs.begin("state", false);
+  prefs.putString("next_mode", "bt");
+  prefs.end();
+  
+  allLightsOffAndSave(); // Turn off lights before restart
+  ESP.restart();
+}
+
+void handleRoot() {
+  // NEW: Added a "Switch to Bluetooth" button to the HTML
+  String html = R"rawliteral(
+<!DOCTYPE html><html><head><title>ESP Light Control</title><meta name="viewport" content="width=device-width, initial-scale=1">
+<style> body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#121212;color:#e0e0e0;padding:20px}.container{max-width:500px;margin:auto}h2,h3{color:#90caf9;border-bottom:1px solid #333;padding-bottom:5px}.control-group{background:#1e1e1e;border-radius:8px;padding:15px;margin-bottom:20px}label{display:block;margin-bottom:5px}.slider-container{display:flex;align-items:center;gap:15px}input[type=range]{flex-grow:1;accent-color:#64b5f6}.output-value{font-weight:700;color:#a5d6a7;min-width:30px}.button-group{display:flex;gap:10px;flex-wrap:wrap;margin-top:10px}button{padding:10px 15px;background:#1e88e5;color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:14px}button.bt{background:#009688} </style>
+</head><body><div class="container">
+<h2>fz ESP Controller (WiFi Mode)</h2>
+<div class="control-group"><h3>Mode Switch</h3><button class="bt" onclick="fetch('/switch-to-bt')">Switch to Bluetooth</button></div>
+<div class="control-group"><h3>RGB LED</h3><div id="preview" style="background-color:rgb()rawliteral" + String(red) + "," + String(green) + "," + String(blue) + R"rawliteral();"></div>
+<label>Red</label><div class="slider-container"><input type="range" id="r" min="0" max="255" value=")rawliteral" + String(red) + R"rawliteral(" oninput="updateSlider('r','r_val');updateRGB()"><span class="output-value" id="r_val">)rawliteral" + String(red) + R"rawliteral(</span></div>
+<label>Green</label><div class="slider-container"><input type="range" id="g" min="0" max="255" value=")rawliteral" + String(green) + R"rawliteral(" oninput="updateSlider('g','g_val');updateRGB()"><span class="output-value" id="g_val">)rawliteral" + String(green) + R"rawliteral(</span></div>
+<label>Blue</label><div class="slider-container"><input type="range" id="b" min="0" max="255" value=")rawliteral" + String(blue) + R"rawliteral(" oninput="updateSlider('b','b_val');updateRGB()"><span class="output-value" id="b_val">)rawliteral" + String(blue) + R"rawliteral(</span></div></div>
+<div class="control-group"><h3>Light 1</h3><div class="slider-container"><input type="range" min="0" max="255" id="l1" value=")rawliteral" + String(light1) + R"rawliteral(" oninput="updateSlider('l1','l1_val');setLight('l1',this.value)"><span class="output-value" id="l1_val">)rawliteral" + String(light1) + R"rawliteral(</span></div></div>
+<div class="control-group"><h3>Light 2</h3><div class="slider-container"><input type="range" min="0" max="255" id="l2" value=")rawliteral" + String(light2) + R"rawliteral(" oninput="updateSlider('l2','l2_val');setLight('l2',this.value)"><span class="output-value" id="l2_val">)rawliteral" + String(light2) + R"rawliteral(</span></div></div>
+</div><script> function updateSlider(e,t){document.getElementById(t).innerText=document.getElementById(e).value}function updateRGB(){const e=document.getElementById("r").value,t=document.getElementById("g").value,n=document.getElementById("b").value;document.getElementById("preview").style.backgroundColor=`rgb(${e},${t},${n})`,clearTimeout(window.rgbTimeout),window.rgbTimeout=setTimeout(()=>{fetch(`/set?r=${e}&g=${t}&b=${n}`)},100)}function setLight(e,t){fetch(`/set?${e}=${t}`)} </script></body></html>
+)rawliteral";
+  server.send(200, "text/html", html);
+}
+void handleSet() { stopEffect(); bool changed = false; if (server.hasArg("r") && server.hasArg("g") && server.hasArg("b")) { red = server.arg("r").toInt(); green = server.arg("g").toInt(); blue = server.arg("b").toInt(); changed = true; } else if (server.hasArg("l1")) { light1 = server.arg("l1").toInt(); changed = true; } else if (server.hasArg("l2")) { light2 = server.arg("l2").toInt(); changed = true; } if (changed) { applyPWM(); lastChange = millis(); pendingSave = true; } server.send(200, "text/plain", "OK"); }
+
+// FIXED: Re-added the missing handleEffect function
+void handleEffect() {
+  if (server.hasArg("mode")) {
+    String mode = server.arg("mode");
+    bool effect_activated = false;
+    if (mode == "rainbow") { currentEffect = RAINBOW; rainbowState = 0; rainbowValue = 0; effect_activated = true; }
+    else if (mode == "breathe") { currentEffect = BREATHE; effect_activated = true; }
+    else if (mode == "rainbow_breathe") { currentEffect = RAINBOW_BREATHE; effect_activated = true; }
+    else if (mode == "flame_breathe") { currentEffect = FLAME_BREATHE; flameR=0; flameG=0; flameB=0; flameForward=true; effect_activated = true; }
+    else if (mode == "none") { stopEffect(); }
+    if (effect_activated) { digitalWrite(BUZZER, HIGH); delay(50); digitalWrite(BUZZER, LOW); }
+  }
+  server.send(200, "text/plain", "OK");
+}
+
+void handleTelegramMessages(int num) { for (int i = 0; i < num; i++) { String text = bot.messages[i].text; String chatId = bot.messages[i].chat_id; if (chatId == CHAT_ID_1 || chatId == CHAT_ID_2) { if (chatId == CHAT_ID_1) { if (text == "/light on") { light1 = 200; light2 = 255; applyPWM(); bot.sendMessage(chatId, "\xF0\x9F\x92\xA1 Lights ON", ""); } else if (text == "/light off") { light1 = 0; light2 = 0; applyPWM(); bot.sendMessage(chatId, "\xF0\x9F\x92\xA1 Lights OFF", ""); } } if (!onlineMessageSent2 && chatId == CHAT_ID_2) { bot.sendMessage(CHAT_ID_2, "light online ase, chaile signal pathaite paro babu", ""); onlineMessageSent2 = true; } if (text == "/ARU_SIGNAL") { stopEffect(); bot.sendMessage(chatId, "❤️ ARU_SIGNAL detected! light joltesay gullu", ""); for (int j = 0; j < 3; j++) { ledcWrite(0, 255); ledcWrite(1, 0); ledcWrite(2, 0); digitalWrite(BUZZER, HIGH); delay(200); ledcWrite(0, 0); ledcWrite(1, 0); ledcWrite(2, 0); digitalWrite(BUZZER, LOW); delay(200); } delay(400); for (int j = 0; j < 3; j++) { ledcWrite(0, 0); ledcWrite(1, 255); ledcWrite(2, 0); digitalWrite(BUZZER, HIGH); delay(600); ledcWrite(0, 0); ledcWrite(1, 0); ledcWrite(2, 0); digitalWrite(BUZZER, LOW); delay(200); } delay(400); for (int j = 0; j < 3; j++) { ledcWrite(0, 0); ledcWrite(1, 0); ledcWrite(2, 255); digitalWrite(BUZZER, HIGH); delay(200); ledcWrite(0, 0); ledcWrite(1, 0); ledcWrite(2, 0); digitalWrite(BUZZER, LOW); delay(200); } delay(500); applyPWM(); } String keyboard = (chatId == CHAT_ID_1) ? "[[\"/light on\", \"/light off\"], [\"/ARU_SIGNAL\"]]" : "[[\"/ARU_SIGNAL\"]]"; bot.sendMessageWithReplyKeyboard(chatId, "", "", keyboard, true); } } }
+
+// --- Bluetooth Command Handler ---
+void handleBluetoothCommands() {
+  if (SerialBT.available()) {
+    String cmd = SerialBT.readStringUntil('\n');
+    cmd.trim();
+
+    if (cmd == "WIFI_ON") {
+      SerialBT.println("OK. Restarting in WiFi mode...");
+      delay(1000);
+      
+      // NEW: Set the next mode to WiFi before restarting
+      prefs.begin("state", false);
+      prefs.putString("next_mode", "wifi");
+      prefs.end();
+      
+      allLightsOffAndSave(); // Turn off lights before restart
+      ESP.restart();
+    }
+    
+    stopEffect();
+
+    if (cmd.startsWith("R")) { red = cmd.substring(1).toInt(); applyPWM(); }
+    else if (cmd.startsWith("G")) { green = cmd.substring(1).toInt(); applyPWM(); }
+    else if (cmd.startsWith("B")) { blue = cmd.substring(1).toInt(); applyPWM(); }
+    else if (cmd.startsWith("L1:")) { light1 = cmd.substring(3).toInt(); applyPWM(); }
+    else if (cmd.startsWith("L2:")) { light2 = cmd.substring(3).toInt(); applyPWM(); }
+    else if (cmd.startsWith("EFFECT:")) {
+      String mode = cmd.substring(7);
+      if (mode == "rainbow") { currentEffect = RAINBOW; rainbowState = 0; rainbowValue = 0; }
+      else if (mode == "breathe") { currentEffect = BREATHE; }
+      else if (mode == "rainbow_breathe") { currentEffect = RAINBOW_BREATHE; }
+      else if (mode == "flame_breathe") { currentEffect = FLAME_BREATHE; flameR=0; flameG=0; flameB=0; flameForward=true; }
+      else if (mode == "none") { stopEffect(); }
+    }
+    SerialBT.println("OK: " + cmd);
+  }
+}
+
+// --- Setup ---
+void setup() {
+  Serial.begin(115200);
+  pinMode(BUZZER, OUTPUT);
+  setupPWM();
+  
+  // NEW: Use Preferences to decide which mode to start in.
+  prefs.begin("state", true); // Open read-only first
+  String nextMode = prefs.getString("next_mode", "bt"); // Default to Bluetooth on first ever boot
+  prefs.end();
+
+  // Now open for writing to clear the flag
+  prefs.begin("state", false);
+  prefs.remove("next_mode");
+  prefs.end();
+
+  if (nextMode == "wifi") {
+      currentMode = MODE_WIFI;
+  } else {
+      currentMode = MODE_BLUETOOTH;
+  }
+
+  if (currentMode == MODE_WIFI) {
+    // --- Start in WiFi Mode ---
+    Serial.println("Starting in WiFi Mode.");
+    signalMode(MODE_WIFI);
+    loadFromFlash(); // Load last state
+    applyPWM();      // Apply it
+
+    WiFi.begin(ssid, password);
+    client.setInsecure();
+    Serial.print("Connecting to WiFi...");
+    while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
+    Serial.println("\nWiFi connected, IP: " + WiFi.localIP().toString());
+    
+    if (MDNS.begin("fz")) { Serial.println("mDNS responder started: http://fz.local"); }
+    
+    server.on("/", handleRoot);
+    server.on("/set", HTTP_GET, handleSet);
+    server.on("/effect", HTTP_GET, handleEffect);
+    server.on("/switch-to-bt", HTTP_GET, handleSwitchToBT); // NEW route
+    server.begin();
+    Serial.println("HTTP server started");
+    
+    bot.sendMessage(CHAT_ID_1, "\xF0\x9F\x9F\xA2 fz ESP Online (v3)", "");
+  } else {
+    // --- Start in Bluetooth Mode ---
+    Serial.println("Starting in Bluetooth Mode.");
+    signalMode(MODE_BLUETOOTH);
+    loadFromFlash();
+    applyPWM();
+    
+    SerialBT.begin("fz-ESP32-Serial");
+    Serial.println("Bluetooth device active, ready to pair.");
+  }
+}
+
+// --- Main Loop ---
+void loop() {
+  if (currentMode == MODE_WIFI) {
+    server.handleClient();
+    if (WiFi.status() == WL_CONNECTED) {
+      int newMsgs = bot.getUpdates(bot.last_message_received + 1);
+      while (newMsgs) { handleTelegramMessages(newMsgs); newMsgs = bot.getUpdates(bot.last_message_received + 1); }
+    }
+  } 
+  else if (currentMode == MODE_BLUETOOTH) {
+    handleBluetoothCommands();
+  }
+
+  // Effect and Save Logic (runs in both modes)
+  switch (currentEffect) {
+    case RAINBOW:         handleRainbow();        break;
+    case BREATHE:         handleBreathe();        break;
+    case RAINBOW_BREATHE: handleRainbowBreathe(); break;
+    case FLAME_BREATHE:   handleFlameBreathe();   break;
+    case NONE:            /* Do nothing */        break;
+  }
+
+  if (pendingSave && millis() - lastChange > 3000) {
+    saveToFlash();
+    pendingSave = false;
+  }
+}

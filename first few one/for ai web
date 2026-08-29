@@ -1,0 +1,110 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include "DHT.h"
+#include "esp_sleep.h"
+
+// DHT22 sensor setup
+#define DHTPIN 15        // GPIO15
+#define DHTTYPE DHT22
+DHT dht(DHTPIN, DHTTYPE);
+
+// WiFi credentials
+const char* ssid = "twogsimp";
+const char* password = "ami2G#sImPeR";
+
+// Device identification - use a unique ID for each ESP32
+const char* device_id = "fzESP"; // Change this if you have multiple devices
+
+// Device location
+const char* device_location = "fz Room"; // Change this to match your device's location
+
+// Vercel API endpoint - REPLACE THIS with your actual deployed Vercel app URL
+const char* serverUrl = "https://v0-esp32-temperature-data.vercel.app/api/sensor-data";
+
+// Deep sleep time: 5 minutes (in microseconds)
+#define uS_TO_S_FACTOR 1000000ULL
+#define TIME_TO_SLEEP 300  // 300 seconds = 5 minutes
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  // Initialize DHT sensor
+  dht.begin();
+
+  // Connect to WiFi
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(250);
+  }
+  Serial.println("\nConnected to WiFi");
+  Serial.println("IP address: " + WiFi.localIP().toString());
+
+  // Read sensor data
+  float h = dht.readHumidity();
+  float t = dht.readTemperature();
+
+  if (isnan(h) || isnan(t)) {
+    Serial.println("Failed to read from DHT22 sensor!");
+  } else {
+    Serial.println("Temperature: " + String(t) + " °C");
+    Serial.println("Humidity: " + String(h) + " %");
+    
+    // Send data to Vercel API
+    sendDataToVercel(t, h);
+  }
+
+  // Go to deep sleep
+  Serial.println("Going to sleep for " + String(TIME_TO_SLEEP) + " seconds...");
+  esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
+  esp_deep_sleep_start();
+}
+
+void loop() {
+  // Nothing here — runs once then sleeps
+}
+
+void sendDataToVercel(float temperature, float humidity) {
+  // Check WiFi connection
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected");
+    return;
+  }
+
+  HTTPClient http;
+  
+  // Configure target server and URL
+  http.begin(serverUrl);
+  
+  // Specify content-type header
+  http.addHeader("Content-Type", "application/json");
+  
+  // Create JSON document
+  StaticJsonDocument<200> doc;
+  doc["device_id"] = device_id;
+  doc["temperature"] = temperature;
+  doc["humidity"] = humidity;
+  doc["location"] = device_location;
+  
+  // Serialize JSON to string
+  String requestBody;
+  serializeJson(doc, requestBody);
+  
+  // Send HTTP POST request
+  int httpResponseCode = http.POST(requestBody);
+  
+  // Check response
+  if (httpResponseCode > 0) {
+    String response = http.getString();
+    Serial.println("HTTP Response code: " + String(httpResponseCode));
+    Serial.println("Response: " + response);
+  } else {
+    Serial.println("Error on sending POST: " + String(httpResponseCode));
+  }
+  
+  // Free resources
+  http.end();
+}

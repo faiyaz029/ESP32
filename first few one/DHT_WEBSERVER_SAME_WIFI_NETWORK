@@ -1,0 +1,148 @@
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
+#include <DHT.h>
+#include <time.h>
+
+// WiFi credentials
+const char *ssid = "twogsimp";
+const char *password = "ami2G#sImPeR";
+
+// DHT setup
+#define DHTPIN 15
+#define DHTTYPE DHT22
+DHT dht(DHTPIN, DHTTYPE);
+
+// Web server
+WebServer server(80);
+
+// Setup WiFi and NTP time
+void setup(void) {
+  Serial.begin(115200);
+  dht.begin();
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  Serial.println("");
+
+  // Wait for connection
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.print("Connected to ");
+  Serial.println(ssid);
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+
+  // Start mDNS
+  if (MDNS.begin("fztemp")) {
+    Serial.println("MDNS responder started");
+  }
+
+  // Setup NTP
+  configTime(0, 0, "pool.ntp.org"); // UTC time
+  Serial.println("Waiting for time sync...");
+  struct tm timeinfo;
+  while (!getLocalTime(&timeinfo)) {
+    Serial.print(".");
+    delay(500);
+  }
+  Serial.println("");
+  Serial.println("Time synchronized!");
+
+  // Setup HTTP server
+  server.on("/", handleRoot);
+  server.begin();
+  Serial.println("HTTP server started");
+}
+
+// Main loop
+void loop(void) {
+  server.handleClient();
+  delay(2); // allow CPU to switch to other tasks
+}
+
+// Handle web page
+void handleRoot() {
+  char msg[2500]; // make it large enough
+  String currentTime = getFormattedTime();
+
+  snprintf(msg, 2500,
+           "<html>\
+  <head>\
+    <meta http-equiv='refresh' content='4'/>\
+    <meta name='viewport' content='width=device-width, initial-scale=1'>\
+    <link rel='stylesheet' href='https://use.fontawesome.com/releases/v5.7.2/css/all.css' integrity='sha384-fnmOCqbTlWIlj8LyTjo7mOUStjsKC4pOpQbqyi7RrhN7udi9RwhKkMHpvLbHG9Sr' crossorigin='anonymous'>\
+    <title>ESP32 DHT Server</title>\
+    <style>\
+      html { font-family: Arial; display: inline-block; margin: 0px auto; text-align: center; background-color: #f0f0f0;}\
+      h2 { font-size: 3.0rem; margin-top: 20px;}\
+      p { font-size: 2.5rem; margin: 10px;}\
+      .units { font-size: 1.2rem; }\
+      .dht-labels { font-size: 1.5rem; vertical-align:middle; padding-bottom: 15px;}\
+      .card { background: white; padding: 20px; border-radius: 10px; display: inline-block; margin-top: 20px; box-shadow: 0px 0px 15px 0px rgba(0,0,0,0.2);}\
+    </style>\
+  </head>\
+  <body>\
+      <h2>ANIK AND FAIYAZ'S ROOM TEMP</h2>\
+      <div class='card'>\
+        <p>\
+          <i class='fas fa-thermometer-half' style='color:#ca3517;'></i>\
+          <span class='dht-labels'>Temperature:</span>\
+          <span>%.2f</span>\
+          <sup class='units'>&deg;C</sup>\
+        </p>\
+        <p>\
+          <i class='fas fa-tint' style='color:#00add6;'></i>\
+          <span class='dht-labels'>Humidity:</span>\
+          <span>%.2f</span>\
+          <sup class='units'>&percnt;</sup>\
+        </p>\
+        <p style='font-size: 1.5rem; margin-top:20px;'> Last Updated: %s</p>\
+      </div>\
+  </body>\
+</html>",
+           readDHTTemperature(), readDHTHumidity(), currentTime.c_str()
+          );
+  server.send(200, "text/html", msg);
+}
+
+// Read temperature
+float readDHTTemperature() {
+  float t = dht.readTemperature();
+  if (isnan(t)) {    
+    Serial.println("Failed to read from DHT sensor!");
+    return -1;
+  } else {
+    Serial.println(t);
+    return t;
+  }
+}
+
+// Read humidity
+float readDHTHumidity() {
+  float h = dht.readHumidity();
+  if (isnan(h)) {
+    Serial.println("Failed to read from DHT sensor!");
+    return -1;
+  } else {
+    Serial.println(h);
+    return h;
+  }
+}
+
+// Get formatted real time
+String getFormattedTime() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    return "Failed to obtain time";
+  }
+  
+  char buf[30];
+  strftime(buf, sizeof(buf), "%Y-%m-%d %I:%M:%S %p", &timeinfo);
+  return String(buf);
+}

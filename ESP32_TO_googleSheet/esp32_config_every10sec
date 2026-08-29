@@ -1,0 +1,104 @@
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include "DHT.h"
+
+#define DHTPIN 15        // DHT22 data pin connected to GPIO15
+#define DHTTYPE DHT22    // Sensor type is DHT22
+
+DHT dht(DHTPIN, DHTTYPE);
+
+const char* ssid = "twogsimp";
+const char* password = "ami2G#sImPeR";
+
+const char* host = "script.google.com";
+const int httpsPort = 443;
+
+WiFiClientSecure client;
+String GAS_ID = "AKfycbz0hL7na9kZmDj0SCJQof_j1Igathv9IvvF08mdg_uDT8yA_1s-Na38ZHhuEXJ6tfs";
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  dht.begin();
+
+  WiFi.begin(ssid, password);
+  Serial.println();
+  Serial.print("Connecting to WiFi");
+
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print(".");
+    delay(500);  // No LED blinking, just delay
+  }
+
+  Serial.println();
+  Serial.print("Connected to: ");
+  Serial.println(ssid);
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+
+  client.setInsecure(); // Accept all SSL certs (not secure for production)
+}
+
+void loop() {
+  float h = dht.readHumidity();
+  float t = dht.readTemperature();
+
+  if (isnan(h) || isnan(t)) {
+    Serial.println("Failed to read from DHT22 sensor!");
+    delay(10000);
+    return;
+  }
+
+  Serial.println("Temperature: " + String(t) + " °C");
+  Serial.println("Humidity: " + String(h) + " %");
+
+  sendData(t, h);
+  delay(10000); // 10 seconds interval between readings
+}
+
+void sendData(float temperature, float humidity) {
+  Serial.println("==========");
+  Serial.print("Connecting to ");
+  Serial.println(host);
+
+  if (!client.connect(host, httpsPort)) {
+    Serial.println("Connection failed");
+    return;
+  }
+
+  String url = "/macros/s/" + GAS_ID + "/exec?temperature=" + String(temperature) + "&humidity=" + String(humidity);
+  Serial.print("Requesting URL: ");
+  Serial.println(url);
+
+  client.print(String("GET ") + url + " HTTP/1.1\r\n" +
+               "Host: " + host + "\r\n" +
+               "User-Agent: ESP32Client\r\n" +
+               "Connection: close\r\n\r\n");
+
+  Serial.println("Request sent");
+
+  while (client.connected()) {
+    String line = client.readStringUntil('\n');
+    if (line == "\r") {
+      Serial.println("Headers received");
+      break;
+    }
+  }
+
+  String line = client.readStringUntil('\n');
+  if (line.startsWith("{\"state\":\"success\"")) {
+    Serial.println("Data sent successfully!");
+  } else {
+    Serial.println("Failed to send data");
+  }
+
+  Serial.print("Reply was: ");
+  Serial.println(line);
+  Serial.println("Closing connection");
+  Serial.println("==========");
+}
+
+
+
+// not working properl
